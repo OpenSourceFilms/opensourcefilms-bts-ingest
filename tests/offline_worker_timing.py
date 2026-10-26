@@ -22,6 +22,11 @@ INVALID_LEASES = (
     -1, 0, -0.5, float("nan"), float("inf"), float("-inf"),
     True, False, None, "60", 10 ** 400, 1e-300,
 )
+INVALID_OWNERS = (
+    None, "", " ", "  worker", "worker ", "worker\nname", "worker\tname",
+    "worker\x00name", 123, True, b"worker", "w" * 257, "wørker",
+)
+
 INVALID_DELAYS = (
     -1, -0.5, float("nan"), float("inf"), float("-inf"),
     True, False, None, "60", 10 ** 400,
@@ -59,6 +64,50 @@ class WorkerDeadlineTests(unittest.TestCase):
             ).fetchone()
             events = c.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         return tuple(row), events
+
+    def test_invalid_owner_cannot_consume_attempt_or_strand_queued_job(self):
+        initial = self.snapshot()
+        for owner in INVALID_OWNERS:
+            with self.subTest(owner=repr(owner)):
+                with self.assertRaisesRegex(ValueError, "worker owner"):
+                    self.reg.lease_job(owner, 60)
+                self.assertEqual(self.snapshot(), initial)
+        # SQL NULL ownership was the original trap: lease_owner=? does not
+        # match NULL, so such a lease is unreachable until expiry.
+        with self.reg.tx() as c:
+            self.assertEqual(
+                c.execute("SELECT COUNT(*) FROM jobs WHERE lease_owner IS NULL "
+                          "AND status='leased'").fetchone()[0], 0,
+            )
+        job = self.reg.lease_job("worker:corrected-01", 60)
+        self.assertEqual(job["attempt"], 1)
+        self.assertEqual(self.snapshot()[0][2], "worker:corrected-01")
+        self.assertTrue(self.reg.heartbeat(self.job_id, "worker:corrected-01", 60))
+        self.assertTrue(self.reg.finish_job(self.job_id, "worker:corrected-01", True))
+        self.assertEqual(self.snapshot()[0][0], "done")
+
+    def test_bad_owner_cannot_modify_an_existing_valid_lease(self):
+        self.reg.lease_job("valid-owner", 60)
+        baseline = self.snapshot()
+        for owner in INVALID_OWNERS:
+            with self.subTest(owner=repr(owner)):
+                with self.assertRaisesRegex(ValueError, "worker owner"):
+                    self.reg.heartbeat(self.job_id, owner, 60)
+                with self.assertRaisesRegex(ValueError, "worker owner"):
+                    self.reg.finish_job(self.job_id, owner, True)
+                with self.assertRaisesRegex(ValueError, "worker owner"):
+                    self.reg.defer_job(self.job_id, owner, 0, "bad worker")
+                self.assertEqual(self.snapshot(), baseline)
+        self.assertTrue(self.reg.defer_job(self.job_id, "valid-owner", 0, "retry"))
+        self.assertEqual(self.snapshot()[0][0], "queued")
+
+    def test_simple_printable_worker_id_preserves_normal_lease_lifecycle(self):
+        owner = "pod:gpu-01 / group:A"
+        leased = self.reg.lease_job(owner, 60)
+        self.assertEqual(leased["attempt"], 1)
+        self.assertTrue(self.reg.heartbeat(self.job_id, owner, 60))
+        self.assertTrue(self.reg.finish_job(self.job_id, owner, True))
+        self.assertEqual(self.snapshot()[0][0], "done")
 
     def test_invalid_initial_lease_cannot_consume_attempt_or_requeue_jobs(self):
         initial = self.snapshot()
