@@ -4,8 +4,16 @@
 Tracked by [issue #2](https://github.com/OpenSourceFilms/opensourcefilms-bts-ingest/issues/2).
 The public repository contains the SQLite registry but not the actual deployed HTTP
 worker endpoints, worker processes, release controls or live database migrations.
-The code in this branch must not be substituted into the service without a
-coordinated, tested release.
+Read-only inspection of the BTS development source identified owner-authenticated
+`/api/worker/lease`, `/api/worker/heartbeat`, `/api/worker/finish` and
+`/api/worker/defer` calls. The worker currently constructs a fresh
+UUID-suffixed owner per acquisition, mitigating the specific same-owner
+reuse condition in that implementation, but it is not an enforced,
+future-proof lease credential. **Do not copy/replace this public registry
+over the separate private development worktree** or live service:
+those implementations have independently diverged and the private tree has
+other uncommitted work. Review and forward-port the minimal changes only
+after the service/worker owner signs off.
 
 ## The safety invariant
 
@@ -36,7 +44,9 @@ replacement for a worker's service/API authentication.
 ## Compatibility and explicit limitations
 
 The additive SQLite column is created for fresh databases and migrated
-idempotently when opening an older database. Historical rows receive NULL.
+idempotently when opening an older database. The presence check and ALTER
+hold SQLite's `BEGIN IMMEDIATE` writer lock so concurrent startup attempts
+cannot race the column addition. Historical rows receive NULL.
 Old-style `lease_job(owner, lease_s)` and existing positional mutators still
 operate on legacy v1 leases. That is intentional for offline compatibility but
 means **the same-owner stale-worker race remains open for v1 jobs**. This branch
@@ -70,7 +80,12 @@ verify no fenced jobs remain, and only then revert the registry/API together.
    owners; lease expiry before reacquire; defer/refund and reacquire with the
    same numeric attempt; delayed heartbeat/finish; process crash; rejected
    malformed tokens; quarantine and attempt limit; B2 side effects and worker
-   retries. Assert that stale results cannot alter the new attempt.
+   retries. Assert that stale results cannot alter the new attempt. Crucially,
+   registry fencing of `finish_job` **does not by itself prevent a stale
+   worker from writing derivative objects to B2 before its completion call**.
+   Fence or version-scope each external publication side effect as well,
+   and ensure a late worker cannot overwrite or promote another attempt's
+   derivatives.
 6. **Accept rollout only with real evidence.** Record exact API/worker/registry
    revisions, migration and rollback procedure, success/error rates, and
    deployment state. Keep production assets and credentials out of GitHub.
