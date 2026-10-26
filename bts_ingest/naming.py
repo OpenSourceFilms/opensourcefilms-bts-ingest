@@ -4,8 +4,8 @@ import unicodedata
 from datetime import date
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
-_KEY_COMPONENT_RE = re.compile(r"[A-Za-z0-9._-]+\\Z")
-_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\\Z")
+_KEY_COMPONENT_RE = re.compile(r"[A-Za-z0-9._-]+")
+_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 MAX_NAME = 180
 MAX_ASSET_ID = 128
 _UNKNOWN_DATE = "0000-00-00"
