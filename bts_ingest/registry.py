@@ -226,12 +226,18 @@ class Registry:
         c = sqlite3.connect(path, timeout=30)
         try:
             c.executescript(SCHEMA)  # executescript manages its own transaction
-            # Additive migration. Old deployments/readers can ignore this column;
-            # the public core never silently converts a legacy lease to fenced.
-            columns = {row[1] for row in c.execute("PRAGMA table_info(jobs)")}
-            if "lease_token_sha256" not in columns:
-                c.execute("ALTER TABLE jobs ADD COLUMN lease_token_sha256 TEXT")
-            c.commit()
+            # Migration uses the SQLite writer lock across the schema check
+            # and ALTER. Concurrent service startups must not race the same
+            # additive column into existence, or rewrite an existing lease.
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                columns = {row[1] for row in c.execute("PRAGMA table_info(jobs)")}
+                if "lease_token_sha256" not in columns:
+                    c.execute("ALTER TABLE jobs ADD COLUMN lease_token_sha256 TEXT")
+                c.commit()
+            except BaseException:
+                c.rollback()
+                raise
         finally:
             c.close()
 
