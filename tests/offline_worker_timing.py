@@ -5,6 +5,7 @@ No network, B2, worker process or production service is contacted.
 """
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 import sys
@@ -107,6 +108,73 @@ class WorkerDeadlineTests(unittest.TestCase):
         self.assertEqual(leased["attempt"], 1)
         self.assertTrue(self.reg.heartbeat(self.job_id, owner, 60))
         self.assertTrue(self.reg.finish_job(self.job_id, owner, True))
+        self.assertEqual(self.snapshot()[0][0], "done")
+
+    def test_malformed_success_hashes_fail_before_job_or_asset_changes(self):
+        self.reg.lease_job("worker", 60)
+        baseline = self.snapshot()
+        asset_before = self.reg.get_asset(self.asset_id)
+        invalid = (
+            {"sha256": ""},
+            {"sha256": "a" * 63},
+            {"sha256": "g" * 64},
+            {"sha256": None},
+            {"sha256": ["a" * 64]},
+            {"sha256": 123},
+            {"sha1": "b" * 39, "sha256": "a" * 64},
+            {"sha1": "z" * 40, "sha256": "a" * 64},
+            {"sha1": ["b" * 40], "sha256": "a" * 64},
+            ["not a result mapping"],
+        )
+        for data in invalid:
+            with self.subTest(result=repr(data)):
+                with self.assertRaisesRegex(ValueError, "worker|result"):
+                    self.reg.finish_job(self.job_id, "worker", True, result=data)
+                self.assertEqual(self.snapshot(), baseline)
+                self.assertEqual(self.reg.get_asset(self.asset_id), asset_before)
+        self.assertTrue(self.reg.heartbeat(self.job_id, "worker", 60))
+
+    def test_success_hashes_are_normalized_before_duplicate_comparison(self):
+        job = self.reg.lease_job("worker", 60)
+        sha256 = "ABCDEF" * 10 + "ABCD"
+        sha1 = "FEDCBA" * 6 + "FEDC"
+        self.assertEqual(len(sha256), 64)
+        self.assertEqual(len(sha1), 40)
+        self.assertTrue(self.reg.finish_job(job["job_id"], "worker", True,
+                        result={"sha256": sha256, "sha1": sha1, "frames": 24}))
+        first = self.reg.get_asset(self.asset_id)
+        self.assertEqual(first["sha256"], sha256.lower())
+        self.assertEqual(first["sha1"], sha1.lower())
+        with self.reg.tx() as c:
+            result = c.execute("SELECT result_json FROM jobs WHERE id=?",
+                               (self.job_id,)).fetchone()
+        self.assertEqual(json.loads(result["result_json"])["sha256"], sha256.lower())
+
+        with mock.patch.dict("os.environ", {"BTS_PUBLIC_BYTE_BUDGET": "1000000"}):
+            _, token = self.reg.create_public_session(max_total_bytes=1000, max_files=5)
+            inv = self.reg.invitation_for_token(token)
+            second, outcome = self.reg.reserve_asset(
+                inv, name="second.mov", relative_path="another-camera/second.mov",
+                size=41, content_type="video/quicktime", last_modified=101,
+                bucket="disposable", key_fn=lambda uid: "synthetic/" + uid,
+            )
+            self.assertEqual(outcome, "new")
+            self.assertTrue(self.reg.mark_completed(second["asset_id"], "version", "etag", "test"))
+        job = self.reg.lease_job("worker-two", 60)
+        self.assertEqual(job["asset"]["asset_id"], second["asset_id"])
+        self.assertTrue(self.reg.finish_job(job["job_id"], "worker-two", True,
+                        result={"sha256": sha256.lower(), "sha1": sha1.lower()}))
+        duplicate = self.reg.get_asset(second["asset_id"])
+        self.assertEqual(duplicate["sha256"], sha256.lower())
+        self.assertEqual(duplicate["duplicate_of"], self.asset_id)
+
+    def test_success_without_content_hash_still_completes_compatibly(self):
+        self.reg.lease_job("worker", 60)
+        self.assertTrue(self.reg.finish_job(self.job_id, "worker", True,
+                                            result={"processed": True}))
+        asset = self.reg.get_asset(self.asset_id)
+        self.assertIsNone(asset["sha256"])
+        self.assertIsNone(asset["duplicate_of"])
         self.assertEqual(self.snapshot()[0][0], "done")
 
     def test_invalid_initial_lease_cannot_consume_attempt_or_requeue_jobs(self):
