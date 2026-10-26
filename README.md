@@ -22,7 +22,7 @@ python3 -B tests/offline_object_key_safety.py -q
 python3 -B tests/offline_worker_timing.py -q
 ```
 
-Expected result: **36 registry tests, 6 object-key tests, and 4 worker-timing tests, all OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
+Expected result: **39 registry tests, 6 object-key tests, and 4 worker-timing tests, all OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
 
 ### Minimal local registry example
 
@@ -57,6 +57,23 @@ stage materialises B2 object keys as directories on a RunPod volume;
 the key validation **does not itself guarantee downstream filesystem
 containment**. The new six synthetic test cases enforce the format without
 accessing the real B2 bucket or production footage.
+
+## Public-intake provenance flag validation
+
+The optional worker-context `is_public_intake` flag distinguishes public
+unclassified submissions from legacy invitations with assigned shoot
+metadata. Python's general truthiness conversion is **not** suitable for
+this identifier: the string `"False"` is truthy, which previously caused
+a legacy invitation to be misclassified as public intake, suppressing its
+shoot date and production in derived provenance.
+
+`public_intake.is_public()` now accepts only actual booleans or the SQLite
+integer representations `0` and `1`. Legacy invitation records without
+the field continue to mean non-public invitation. When the field is
+**present** but malformed, the library raises `ValueError` rather than
+inventing a classification. Three synthetic regressions verify correct
+legitimate values and refusals without contacting workers, real sessions,
+storage or deployed services.
 
 ## Strict byte-count and quota contract
 
