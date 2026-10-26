@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   attempts INTEGER NOT NULL DEFAULT 0,
   lease_owner TEXT,
   lease_expires REAL,
+  lease_token_sha256 TEXT,    -- optional v2 fencing; legacy leases use NULL
   result_json TEXT,
   error TEXT,
   available_at REAL NOT NULL DEFAULT 0,
@@ -206,6 +207,15 @@ def sha256_hex(s):
     return hashlib.sha256(s.encode()).hexdigest()
 
 
+def _lease_token_hash(token):
+    """None selects only a historical un-fenced lease, never a v2 lease."""
+    if token is None:
+        return None
+    if not _valid_bearer_token(token):
+        raise ValueError("lease token must be a valid opaque bearer credential")
+    return sha256_hex(token)
+
+
 class Registry:
     def __init__(self, path=DEFAULT_DB):
         if path is None:
@@ -216,6 +226,12 @@ class Registry:
         c = sqlite3.connect(path, timeout=30)
         try:
             c.executescript(SCHEMA)  # executescript manages its own transaction
+            # Additive migration. Old deployments/readers can ignore this column;
+            # the public core never silently converts a legacy lease to fenced.
+            columns = {row[1] for row in c.execute("PRAGMA table_info(jobs)")}
+            if "lease_token_sha256" not in columns:
+                c.execute("ALTER TABLE jobs ADD COLUMN lease_token_sha256 TEXT")
+            c.commit()
         finally:
             c.close()
 
@@ -561,7 +577,17 @@ class Registry:
         return [dict(r) for r in rows]
 
     # -- jobs (leased to workers through the service API) -------------------------------------
-    def lease_job(self, owner, lease_s):
+    def lease_job_fenced(self, owner, lease_s):
+        """Versioned opt-in lease with a new bearer credential each acquisition.
+
+        The HTTP service must offer separate authenticated v2 endpoints and
+        eventually retire v1 leasing to make fencing universal.
+        """
+        return self.lease_job(owner, lease_s, fenced=True)
+
+    def lease_job(self, owner, lease_s, *, fenced=False):
+        if type(fenced) is not bool:
+            raise ValueError("fenced must be a boolean")
         owner = _worker_owner(owner)
         lease_s = _worker_duration(lease_s, "lease_s")
         with self.tx() as c:
@@ -571,27 +597,36 @@ class Registry:
                 raise ValueError("lease_s must produce a finite future deadline")
             # Crashed workers spend attempts too; expiry must not bypass the budget.
             c.execute("UPDATE jobs SET status='quarantined', lease_owner=NULL, lease_expires=NULL,"
-                      " updated_at=? WHERE status='leased' AND lease_expires <= ? AND attempts >= ?",
+                      " lease_token_sha256=NULL, updated_at=?"
+                      " WHERE status='leased' AND lease_expires <= ? AND attempts >= ?",
                       (now, now, MAX_ATTEMPTS))
-            c.execute("UPDATE jobs SET status='queued', lease_owner=NULL, lease_expires=NULL, updated_at=? "
+            c.execute("UPDATE jobs SET status='queued', lease_owner=NULL, lease_expires=NULL,"
+                      " lease_token_sha256=NULL, updated_at=? "
                       "WHERE status='leased' AND lease_expires <= ?", (now, now))
             j = c.execute("SELECT * FROM jobs WHERE status='queued' AND available_at <= ? ORDER BY id LIMIT 1",
                           (now,)).fetchone()
             if j is None:
                 return None
-            c.execute("UPDATE jobs SET status='leased', lease_owner=?, lease_expires=?, attempts=attempts+1,"
-                      " updated_at=? WHERE id=?", (owner, deadline, now, j["id"]))
+            token = secrets.token_urlsafe(32) if fenced else None
+            c.execute("UPDATE jobs SET status='leased', lease_owner=?, lease_expires=?,"
+                      " lease_token_sha256=?, attempts=attempts+1,"
+                      " updated_at=? WHERE id=?",
+                      (owner, deadline, _lease_token_hash(token), now, j["id"]))
             self.event(c, owner, "job.leased", j["asset_id"], job_id=j["id"], attempt=j["attempts"] + 1)
             a = c.execute("SELECT * FROM assets WHERE asset_id=?", (j["asset_id"],)).fetchone()
             inv = c.execute("SELECT i.production, i.shoot_date, i.shoot_slug, i.contributor_slug,"
                             " i.contributor_label, p.invitation_id AS public_invitation_id"
                             " FROM invitations i LEFT JOIN public_sessions p ON p.invitation_id=i.id"
                             " WHERE i.id=?", (a["invitation_id"],)).fetchone()
-        return {"job_id": j["id"], "attempt": j["attempts"] + 1, "asset": dict(a),
-                "invitation": {**dict(inv), "is_public_intake": inv["public_invitation_id"] is not None}}
+        lease = {"job_id": j["id"], "attempt": j["attempts"] + 1, "asset": dict(a),
+                 "invitation": {**dict(inv), "is_public_intake": inv["public_invitation_id"] is not None}}
+        if fenced:
+            lease["lease_token"] = token  # only returned once, never logged/stored as plaintext
+        return lease
 
-    def heartbeat(self, job_id, owner, lease_s):
+    def heartbeat(self, job_id, owner, lease_s, *, lease_token=None):
         owner = _worker_owner(owner)
+        token_hash = _lease_token_hash(lease_token)
         lease_s = _worker_duration(lease_s, "lease_s")
         with self.tx() as c:
             now = time.time()
@@ -599,12 +634,14 @@ class Registry:
             if not math.isfinite(deadline) or deadline <= now:
                 raise ValueError("lease_s must produce a finite future deadline")
             cur = c.execute("UPDATE jobs SET lease_expires=?, updated_at=? WHERE id=? AND lease_owner=?"
-                            " AND status='leased' AND lease_expires>?",
-                            (deadline, now, job_id, owner, now))
+                            " AND lease_token_sha256 IS ? AND status='leased' AND lease_expires>?",
+                            (deadline, now, job_id, owner, token_hash, now))
         return bool(cur.rowcount)
 
-    def finish_job(self, job_id, owner, ok, result=None, error=None, quarantine=False):
+    def finish_job(self, job_id, owner, ok, result=None, error=None,
+                   quarantine=False, *, lease_token=None):
         owner = _worker_owner(owner)
+        token_hash = _lease_token_hash(lease_token)
         if ok:
             result = _canonical_worker_result(result)
         with self.tx() as c:
@@ -613,6 +650,7 @@ class Registry:
             # An expired lease no longer owns the job, even if another
             # worker has not yet run lease_job() to requeue it.
             if (j is None or j["lease_owner"] != owner or j["status"] != "leased"
+                    or j["lease_token_sha256"] != token_hash
                     or j["lease_expires"] is None or j["lease_expires"] <= now):
                 return False
             if ok:
@@ -621,7 +659,8 @@ class Registry:
                 status = "quarantined"
             else:
                 status = "queued"
-            c.execute("UPDATE jobs SET status=?, lease_owner=NULL, lease_expires=NULL, result_json=?,"
+            c.execute("UPDATE jobs SET status=?, lease_owner=NULL, lease_expires=NULL,"
+                      " lease_token_sha256=NULL, result_json=?,"
                       " error=?, updated_at=? WHERE id=?",
                       (status, json.dumps(result) if result is not None else j["result_json"], error, now, job_id))
             self.event(c, owner, f"job.{status}", j["asset_id"], job_id=job_id, error=error)
@@ -639,9 +678,10 @@ class Registry:
                     self.event(c, owner, "asset.content_duplicate", j["asset_id"], duplicate_of=dup["asset_id"])
         return True
 
-    def defer_job(self, job_id, owner, delay_s, reason):
+    def defer_job(self, job_id, owner, delay_s, reason, *, lease_token=None):
         """Give a job back without spending an attempt (e.g. no scratch space right now)."""
         owner = _worker_owner(owner)
+        token_hash = _lease_token_hash(lease_token)
         delay_s = _worker_duration(delay_s, "delay_s", allow_zero=True)
         with self.tx() as c:
             now = time.time()
@@ -649,9 +689,11 @@ class Registry:
             if not math.isfinite(available_at) or available_at < now:
                 raise ValueError("delay_s must produce a finite retry deadline")
             cur = c.execute("UPDATE jobs SET status='queued', lease_owner=NULL, lease_expires=NULL,"
-                            " attempts=MAX(attempts-1,0), available_at=?, error=?, updated_at=?"
-                            " WHERE id=? AND lease_owner=? AND status='leased' AND lease_expires>?",
-                            (available_at, f"deferred: {reason}", now, job_id, owner, now))
+                            " lease_token_sha256=NULL, attempts=MAX(attempts-1,0),"
+                            " available_at=?, error=?, updated_at=?"
+                            " WHERE id=? AND lease_owner=? AND lease_token_sha256 IS ?"
+                            " AND status='leased' AND lease_expires>?",
+                            (available_at, f"deferred: {reason}", now, job_id, owner, token_hash, now))
             if cur.rowcount:
                 j = c.execute("SELECT asset_id FROM jobs WHERE id=?", (job_id,)).fetchone()
                 self.event(c, owner, "job.deferred", j["asset_id"], job_id=job_id, reason=reason, delay_s=delay_s)
