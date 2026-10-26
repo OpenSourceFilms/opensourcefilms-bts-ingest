@@ -176,6 +176,71 @@ class PublicIntakeTest(unittest.TestCase):
         self.assertTrue(self.reg.touch(uid, status="uploading"))
         self.assertTrue(self.reg.touch(uid))
 
+    def test_invalid_multipart_upload_id_cannot_start_upload(self):
+        asset, outcome = self.reserve(self.t1, name="invalid-multipart.mov")
+        self.assertEqual(outcome, "new")
+        uid = asset["asset_id"]
+        with self.reg.tx() as c:
+            original = c.execute(
+                "SELECT status, s3_upload_id, updated_at, last_activity_at "
+                "FROM assets WHERE asset_id=?", (uid,)
+            ).fetchone()
+            events = c.execute(
+                "SELECT COUNT(*) FROM events WHERE asset_id=?", (uid,)
+            ).fetchone()[0]
+
+        invalid = (None, "", " ", "abc def", "abc\n", "\t", "\x7f",
+                   "abc\x00def", b"abc", True, 7, "é", "a" * 4097)
+        for value in invalid:
+            with self.subTest(upload_id=repr(value)):
+                with self.assertRaisesRegex(ValueError, "upload_id"):
+                    self.reg.bind_upload_id(uid, value)
+                with self.reg.tx() as c:
+                    after = c.execute(
+                        "SELECT status, s3_upload_id, updated_at, last_activity_at "
+                        "FROM assets WHERE asset_id=?", (uid,)
+                    ).fetchone()
+                    count = c.execute(
+                        "SELECT COUNT(*) FROM events WHERE asset_id=?", (uid,)
+                    ).fetchone()[0]
+                self.assertEqual(tuple(after), tuple(original))
+                self.assertEqual(count, events)
+        self.assertEqual(self.reg.get_asset(uid)["status"], "reserved")
+
+    def test_multipart_binding_refreshes_activity_and_remains_idempotent(self):
+        asset, outcome = self.reserve(self.t1, name="stale-before-bind.mov")
+        self.assertEqual(outcome, "new")
+        uid = asset["asset_id"]
+        old = time.time() - 86400
+        with self.reg.tx() as c:
+            c.execute("UPDATE assets SET last_activity_at=?, updated_at=? "
+                      "WHERE asset_id=?", (old, old, uid))
+        self.assertIn(uid, [a["asset_id"] for a in self.reg.open_assets(3600)])
+
+        # S3-style punctuation is permitted. Binding a multipart ID counts as
+        # upload activity; a housekeeping job should no longer see it as stale.
+        multipart_id = "ExampleUpload+part/2=_-"
+        started = time.time()
+        self.assertTrue(self.reg.bind_upload_id(uid, multipart_id))
+        after = self.reg.get_asset(uid)
+        self.assertEqual(after["status"], "uploading")
+        self.assertEqual(after["s3_upload_id"], multipart_id)
+        self.assertGreaterEqual(after["last_activity_at"], started)
+        self.assertGreaterEqual(after["updated_at"], started)
+        self.assertNotIn(uid, [a["asset_id"] for a in self.reg.open_assets(3600)])
+
+        self.assertTrue(self.reg.bind_upload_id(uid, multipart_id))
+        self.assertFalse(self.reg.bind_upload_id(uid, "other-upload"))
+        with self.reg.tx() as c:
+            bound = c.execute(
+                "SELECT COUNT(*) FROM events WHERE asset_id=? AND kind='asset.multipart_bound'",
+                (uid,)
+            ).fetchone()[0]
+        self.assertEqual(bound, 1)
+        self.assertTrue(self.reg.mark_completed(uid, "synthetic-version", "synthetic-etag", "test"))
+        self.assertFalse(self.reg.bind_upload_id(uid, multipart_id))
+        self.assertEqual(self.reg.get_asset(uid)["status"], "completed")
+
     def test_resume_stays_inside_capability(self):
         a,s1=self.reserve(self.t1)
         b,s2=self.reserve(self.t1)

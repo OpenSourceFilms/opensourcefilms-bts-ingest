@@ -21,7 +21,7 @@ python3 -B tests/offline_public_intake.py -q
 python3 -B tests/offline_object_key_safety.py -q
 ```
 
-Expected result: **Ran 30 tests, OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
+Expected result: **Ran 32 registry tests and 6 object-key tests, OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
 
 ### Minimal local registry example
 
@@ -70,6 +70,27 @@ This validation is important: a negative byte count would otherwise
 reduce the recorded total and allow later reservations to exceed both
 per-session and aggregate public budgets. The offline regression suite
 verifies the attempted bypass is refused.
+
+## Multipart upload ID binding and activity
+
+`Registry.bind_upload_id()` requires a **nonempty, printable ASCII**
+multipart upload ID between 1 and 4,096 characters. Null IDs, empty
+strings, spaces, controls and non-string values cannot move an asset
+from `reserved` to `uploading` or emit a binding event. Normal
+S3-compatible punctuation remains accepted.
+
+On the first successful binding the registry updates
+`last_activity_at` together with `updated_at` and `s3_upload_id`
+under the same SQLite transaction. The stale-upload scanner uses
+`last_activity_at`, so initiating multipart upload now counts as
+activity. Rebinding the same ID is idempotent, a different ID is refused,
+and a completed asset cannot reopen. Subsequent upload signing/activity
+still uses `touch()` to renew the inactivity clock.
+
+Two temporary-SQLite regressions cover invalid identifiers, exact
+non-mutation on rejection, stale-upload recovery, idempotency and
+completion. This is a public library contract, **not evidence that the
+deployed HTTP signing and B2 service use the updated implementation**.
 
 ## Invitation revocation, expiry and upload-resume grace
 
