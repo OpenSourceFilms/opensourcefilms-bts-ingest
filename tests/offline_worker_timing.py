@@ -1,0 +1,136 @@
+"""Offline BTS worker-deadline validation, with disposable SQLite only.
+
+This is not an API-consumer compatibility or per-attempt lease-fencing test.
+No network, B2, worker process or production service is contacted.
+"""
+from __future__ import annotations
+
+import math
+from pathlib import Path
+import sys
+import tempfile
+import time
+import unittest
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from bts_ingest import registry
+
+
+INVALID_LEASES = (
+    -1, 0, -0.5, float("nan"), float("inf"), float("-inf"),
+    True, False, None, "60", 10 ** 400, 1e-300,
+)
+INVALID_DELAYS = (
+    -1, -0.5, float("nan"), float("inf"), float("-inf"),
+    True, False, None, "60", 10 ** 400,
+)
+
+
+class WorkerDeadlineTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix="bts_worker_timing_")
+        self.addCleanup(directory.cleanup)
+        self.reg = registry.Registry(Path(directory.name) / "isolated.sqlite3")
+        with mock.patch.dict("os.environ", {"BTS_PUBLIC_BYTE_BUDGET": "1000000"}):
+            iid, token = self.reg.create_public_session(max_total_bytes=1000, max_files=5)
+            inv = self.reg.invitation_for_token(token)
+            asset, outcome = self.reg.reserve_asset(
+                inv, name="synthetic.mov", relative_path="camera/synthetic.mov",
+                size=123, content_type="video/quicktime", last_modified=100,
+                bucket="disposable", key_fn=lambda uid: "synthetic/" + uid,
+            )
+            self.assertEqual(outcome, "new")
+            self.assertEqual(asset["invitation_id"], iid)
+            self.assertTrue(self.reg.mark_completed(asset["asset_id"], "v", "etag", "test"))
+        self.asset_id = asset["asset_id"]
+        with self.reg.tx() as c:
+            self.job_id = c.execute(
+                "SELECT id FROM jobs WHERE asset_id=?", (self.asset_id,)
+            ).fetchone()["id"]
+
+    def snapshot(self):
+        with self.reg.tx() as c:
+            row = c.execute(
+                "SELECT status, attempts, lease_owner, lease_expires, "
+                "available_at, updated_at, result_json, error FROM jobs WHERE id=?",
+                (self.job_id,)
+            ).fetchone()
+            events = c.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        return tuple(row), events
+
+    def test_invalid_initial_lease_cannot_consume_attempt_or_requeue_jobs(self):
+        initial = self.snapshot()
+        for bad in INVALID_LEASES:
+            with self.subTest(lease_s=repr(bad)):
+                with self.assertRaises(ValueError):
+                    self.reg.lease_job("worker", bad)
+                self.assertEqual(self.snapshot(), initial)
+        job = self.reg.lease_job("worker", 60.5)
+        self.assertEqual(job["job_id"], self.job_id)
+        self.assertEqual(job["attempt"], 1)
+        self.assertEqual(self.snapshot()[0][1], 1)
+
+    def test_invalid_heartbeat_leaves_current_lease_unchanged(self):
+        self.reg.lease_job("worker", 60)
+        before = self.snapshot()
+        for bad in INVALID_LEASES:
+            with self.subTest(lease_s=repr(bad)):
+                with self.assertRaises(ValueError):
+                    self.reg.heartbeat(self.job_id, "worker", bad)
+                self.assertEqual(self.snapshot(), before)
+        self.assertTrue(self.reg.heartbeat(self.job_id, "worker", 60.25))
+        after = self.snapshot()
+        self.assertEqual(after[0][0], "leased")
+        self.assertGreater(after[0][3], time.time())
+        self.assertTrue(self.reg.finish_job(self.job_id, "worker", True,
+                                            result={"sha256": "a" * 64}))
+        self.assertEqual(self.snapshot()[0][0], "done")
+
+    def test_invalid_deferrals_never_erase_lease_or_set_retry_infinity(self):
+        self.reg.lease_job("worker", 60)
+        before = self.snapshot()
+        for bad in INVALID_DELAYS:
+            with self.subTest(delay_s=repr(bad)):
+                with self.assertRaises(ValueError):
+                    self.reg.defer_job(self.job_id, "worker", bad, "synthetic capacity")
+                self.assertEqual(self.snapshot(), before)
+        self.assertTrue(self.reg.defer_job(self.job_id, "worker", 0, "zero-delay retry"))
+        state, _events = self.snapshot()
+        self.assertEqual(state[0], "queued")
+        self.assertEqual(state[1], 0)
+        self.assertIsNone(state[2])
+        self.assertIsNone(state[3])
+        self.assertTrue(math.isfinite(state[4]))
+        self.assertLessEqual(state[4], time.time())
+        next_attempt = self.reg.lease_job("worker", 60)
+        self.assertEqual(next_attempt["attempt"], 1)
+
+    def test_positive_fractional_defer_and_expired_lease_rejection(self):
+        first = self.reg.lease_job("worker", 60)
+        self.assertEqual(first["attempt"], 1)
+        before = time.time()
+        self.assertTrue(self.reg.defer_job(self.job_id, "worker", 0.25, "short retry"))
+        with self.reg.tx() as c:
+            queued = c.execute(
+                "SELECT available_at, status FROM jobs WHERE id=?", (self.job_id,)
+            ).fetchone()
+        self.assertEqual(queued["status"], "queued")
+        self.assertGreaterEqual(queued["available_at"], before + 0.20)
+        self.assertIsNone(self.reg.lease_job("another-worker", 30))
+
+        with self.reg.tx() as c:
+            c.execute("UPDATE jobs SET available_at=0 WHERE id=?", (self.job_id,))
+        self.reg.lease_job("worker", 60)
+        with self.reg.tx() as c:
+            c.execute("UPDATE jobs SET lease_expires=? WHERE id=?",
+                      (time.time() - 10, self.job_id))
+        before_expired = self.snapshot()
+        self.assertFalse(self.reg.heartbeat(self.job_id, "worker", 60))
+        self.assertFalse(self.reg.defer_job(self.job_id, "worker", 0, "too late"))
+        self.assertEqual(self.snapshot(), before_expired)
+
+
+if __name__ == "__main__":
+    unittest.main()
