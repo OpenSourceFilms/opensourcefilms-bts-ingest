@@ -355,14 +355,17 @@ class Registry:
         return True
 
     def touch(self, asset_id, status=None):
-        """Update signing activity only while open; return atomic CAS success.
+        """Update signing activity while open; never set a terminal state.
 
-        Callers must never hand a new signed URL to an already completed,
-        aborted, or failed original after a concurrent state transition.
+        Completion is exclusively mark_completed(), which records object
+        provenance and queues its processing job. Aborts/failures are
+        exclusively mark_status(). Signing activity cannot bypass either.
         """
+        if status is not None and status not in ("reserved", "uploading"):
+            raise ValueError("touch status must be 'reserved' or 'uploading'")
         now = time.time()
         with self.tx() as c:
-            if status:
+            if status is not None:
                 cur = c.execute(
                     "UPDATE assets SET last_activity_at=?, status=?, updated_at=? "
                     "WHERE asset_id=? AND status IN ('reserved','uploading')",

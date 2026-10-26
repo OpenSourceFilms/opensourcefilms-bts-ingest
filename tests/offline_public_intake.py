@@ -80,6 +80,50 @@ class PublicIntakeTest(unittest.TestCase):
         self.assertEqual(self.reg.receipt(self.p1)[0]["asset_id"],a["asset_id"])
         self.assertEqual(self.reg.receipt(self.p2)[0]["asset_id"],b["asset_id"])
 
+    def test_touch_refuses_terminal_or_arbitrary_status_without_mutation(self):
+        asset, status = self.reserve(self.t1, name="touch-test.mov")
+        self.assertEqual(status, "new")
+        with self.reg.tx() as c:
+            before = c.execute(
+                "SELECT status, updated_at, last_activity_at FROM assets WHERE asset_id=?",
+                (asset["asset_id"],),
+            ).fetchone()
+            self.assertEqual(c.execute(
+                "SELECT COUNT(*) FROM jobs WHERE asset_id=?", (asset["asset_id"],)
+            ).fetchone()[0], 0)
+
+        for invalid in ("completed", "aborted", "failed", "quarantined", "garbage", "", True):
+            with self.subTest(invalid=repr(invalid)):
+                with self.assertRaisesRegex(ValueError, "touch status"):
+                    self.reg.touch(asset["asset_id"], status=invalid)
+                with self.reg.tx() as c:
+                    current = c.execute(
+                        "SELECT status, updated_at, last_activity_at FROM assets WHERE asset_id=?",
+                        (asset["asset_id"],),
+                    ).fetchone()
+                    self.assertEqual(tuple(current), tuple(before))
+                    self.assertEqual(c.execute(
+                        "SELECT COUNT(*) FROM jobs WHERE asset_id=?", (asset["asset_id"],)
+                    ).fetchone()[0], 0)
+
+    def test_touch_retains_open_state_activity_and_completion_contract(self):
+        asset, status = self.reserve(self.t1, name="open-activity.mov")
+        self.assertEqual(status, "new")
+        uid = asset["asset_id"]
+        self.assertTrue(self.reg.touch(uid))
+        self.assertTrue(self.reg.touch(uid, status="reserved"))
+        self.assertTrue(self.reg.touch(uid, status="uploading"))
+        self.assertEqual(self.reg.get_asset(uid)["status"], "uploading")
+        self.assertTrue(self.reg.mark_completed(uid, "version-123", "etag-123", "test"))
+        self.assertFalse(self.reg.touch(uid))
+        self.assertFalse(self.reg.touch(uid, status="uploading"))
+        with self.reg.tx() as c:
+            jobs = c.execute(
+                "SELECT kind, status FROM jobs WHERE asset_id=?", (uid,)
+            ).fetchall()
+        self.assertEqual([tuple(row) for row in jobs], [("process", "queued")])
+        self.assertEqual(self.reg.get_asset(uid)["status"], "completed")
+
     def test_resume_stays_inside_capability(self):
         a,s1=self.reserve(self.t1)
         b,s2=self.reserve(self.t1)
