@@ -22,7 +22,7 @@ python3 -B tests/offline_object_key_safety.py -q
 python3 -B tests/offline_worker_timing.py -q
 ```
 
-Expected result: **39 registry tests, 6 object-key tests, and 4 worker-timing tests, all OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
+Expected result: **42 registry tests, 6 object-key tests, and 4 worker-timing tests, all OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
 
 ### Minimal local registry example
 
@@ -171,6 +171,26 @@ without changing the existing status or timestamps. Timestamp-only
 `touch()` remains supported on either open state. This applies equally
 after an S3 multipart upload ID has been bound. Synthetic SQLite tests
 verify these restrictions without touching object storage.
+
+## Upload completion requires object identifiers
+
+`Registry.mark_completed()` moves an asset to terminal `completed`,
+records the supplied B2/S3 version ID and ETag, and enqueues its processing
+job. Previously it accepted `None`, empty strings or control-bearing
+values for those object identifiers, irreversibly completing an asset without
+usable storage identity.
+
+Both `version_id` and `etag` now require nonempty, printable ASCII
+strings of at most 4,096 characters **before any database changes**. Quoted
+S3 ETags and multipart ETags containing hyphens remain permitted. Invalid
+metadata raises `ValueError` while preserving the asset's open state,
+timestamps, event journal and processing queue. Three synthetic SQLite
+regressions test refused inputs, no side effects, and normal completion.
+
+**This validation does not establish the object's existence or verify its
+content.** A deployed API must independently authenticate the completing
+actor and check storage responses against the actual uploaded object; these
+public modules do not implement that HTTP/storage verification.
 
 ## Worker scheduling durations
 
