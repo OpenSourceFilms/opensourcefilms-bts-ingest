@@ -174,6 +174,33 @@ def _object_identity(value, field):
     return value
 
 
+_SHA256_HEX_RE = re.compile(r"[A-Fa-f0-9]{64}")
+_SHA1_HEX_RE = re.compile(r"[A-Fa-f0-9]{40}")
+
+
+def _canonical_worker_result(result):
+    """Validate supplied success digests before a job's terminal transition.
+
+    The worker's hashes are claims, not independently verified B2 contents.
+    Invalid digests must never populate asset provenance or influence
+    duplicate-of links. Preserve unrelated result metadata as supplied.
+    """
+    if result is None:
+        return None
+    if not isinstance(result, dict):
+        raise ValueError("successful worker result must be a JSON object")
+    canonical = dict(result)
+    for field, pattern in (("sha256", _SHA256_HEX_RE), ("sha1", _SHA1_HEX_RE)):
+        value = canonical.get(field)
+        if field == "sha1" and value is None:
+            continue  # optional SHA-1 may explicitly be null
+        if field in canonical:
+            if type(value) is not str or pattern.fullmatch(value) is None:
+                raise ValueError(f"worker {field} must be a hexadecimal content digest")
+            canonical[field] = value.lower()
+    return canonical
+
+
 def sha256_hex(s):
     return hashlib.sha256(s.encode()).hexdigest()
 
@@ -577,6 +604,8 @@ class Registry:
 
     def finish_job(self, job_id, owner, ok, result=None, error=None, quarantine=False):
         owner = _worker_owner(owner)
+        if ok:
+            result = _canonical_worker_result(result)
         with self.tx() as c:
             now = time.time()
             j = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -596,6 +625,7 @@ class Registry:
                       (status, json.dumps(result) if result is not None else j["result_json"], error, now, job_id))
             self.event(c, owner, f"job.{status}", j["asset_id"], job_id=job_id, error=error)
             if ok and result and result.get("sha256"):
+                # Compare canonical digests, never arbitrary worker values.
                 dup = c.execute("SELECT asset_id FROM assets WHERE sha256=? AND asset_id<>? ORDER BY completed_at"
                                 " LIMIT 1", (result["sha256"], j["asset_id"])).fetchone()
                 c.execute("UPDATE assets SET sha256=?, sha1=?, duplicate_of=?, updated_at=? WHERE asset_id=?",
