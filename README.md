@@ -21,7 +21,7 @@ python3 -B tests/offline_public_intake.py -q
 python3 -B tests/offline_object_key_safety.py -q
 ```
 
-Expected result: **Ran 32 registry tests and 6 object-key tests, OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
+Expected result: **Ran 36 registry tests and 6 object-key tests, OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
 
 ### Minimal local registry example
 
@@ -91,6 +91,27 @@ Two temporary-SQLite regressions cover invalid identifiers, exact
 non-mutation on rejection, stale-upload recovery, idempotency and
 completion. This is a public library contract, **not evidence that the
 deployed HTTP signing and B2 service use the updated implementation**.
+
+## Invitation lifetime and quota validation
+
+Both administrative invitations and public upload sessions validate their
+time-limited capabilities before generating a bearer token or writing to
+SQLite. `ttl_s` must be a **finite positive numeric duration**, and the
+resulting expiry must be strictly in the future. An administrative
+`finish_grace_s` must be finite and nonnegative; expiry plus grace must
+also be finite. The existing public-session grace period remains 72 hours.
+
+`max_total_bytes` and `max_files` must be nonnegative Python integers
+within SQLite's signed 64-bit range. Zero remains supported for an
+administratively disabled quota. NaN/infinity, booleans, negative counts,
+oversized integers and nonnumeric lifetimes are rejected, instead of
+creating unusable records or inadvertently non-expiring capabilities.
+
+Four additional temporary-SQLite regression tests cover invalid admin
+and public settings with zero database mutations, and preserve normal
+fractional-duration and zero-grace operation. This tests only the
+published registry, not the lifetime policy enforced by a deployed
+HTTP service.
 
 ## Invitation revocation, expiry and upload-resume grace
 

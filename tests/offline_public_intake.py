@@ -3,6 +3,7 @@
 No B2 access, API startup, production database or network. Self-contained SQLite.
 """
 import json
+import math
 import pathlib
 import sqlite3
 import sys
@@ -39,6 +40,95 @@ class PublicIntakeTest(unittest.TestCase):
             bucket="example-bts-objects",
             key_fn=lambda uid:naming.original_key(inv["production"],inv["shoot_date"],
                  inv["shoot_slug"],inv["contributor_slug"],uid,name))
+
+    def test_public_session_rejects_nonfinite_or_invalid_ttls_without_writes(self):
+        invalid = (-1, 0, -0.1, float("inf"), float("-inf"),
+                   float("nan"), True, False, None, "3600", 10 ** 400, 1e-300)
+        with self.reg.tx() as c:
+            original = tuple(c.execute(
+                "SELECT (SELECT COUNT(*) FROM invitations), "
+                "(SELECT COUNT(*) FROM public_sessions), "
+                "(SELECT COUNT(*) FROM events)"
+            ).fetchone())
+        for value in invalid:
+            with self.subTest(ttl=repr(value)):
+                with mock.patch.object(registry.secrets, "token_urlsafe",
+                                       side_effect=AssertionError("token generated")):
+                    with self.assertRaisesRegex(ValueError, "ttl_s"):
+                        self.reg.create_public_session(ttl_s=value)
+                with self.reg.tx() as c:
+                    after = tuple(c.execute(
+                        "SELECT (SELECT COUNT(*) FROM invitations), "
+                        "(SELECT COUNT(*) FROM public_sessions), "
+                        "(SELECT COUNT(*) FROM events)"
+                    ).fetchone())
+                self.assertEqual(after, original)
+
+    def test_admin_invitation_rejects_nonfinite_ttl_and_grace(self):
+        settings = dict(production="ExampleProduction", shoot_date="2026-10-27",
+                        shoot_slug="unit", contributor_slug="crew",
+                        contributor_label="Synthetic", ttl_s=3600,
+                        max_total_bytes=1000, max_files=2, finish_grace_s=60)
+        invalid_duration = (-60, float("inf"), float("-inf"), float("nan"),
+                            True, None, "60", 10 ** 400)
+        with self.reg.tx() as c:
+            before = c.execute("SELECT COUNT(*) FROM invitations").fetchone()[0]
+        for field in ("ttl_s", "finish_grace_s"):
+            for value in invalid_duration:
+                with self.subTest(field=field, invalid=repr(value)):
+                    args = dict(settings, **{field: value})
+                    with self.assertRaises(ValueError):
+                        self.reg.create_invitation(**args)
+        for ttl, grace in ((1e308, 1e308), (1e-300, 0)):
+            with self.subTest(ttl=ttl, grace=grace):
+                with self.assertRaises(ValueError):
+                    self.reg.create_invitation(**dict(settings, ttl_s=ttl,
+                                                      finish_grace_s=grace))
+        with self.reg.tx() as c:
+            self.assertEqual(
+                c.execute("SELECT COUNT(*) FROM invitations").fetchone()[0], before
+            )
+
+    def test_both_capability_creators_validate_integer_quota_fields(self):
+        bad = (-1, True, False, 12.0, "12", None, 1 << 63, 10 ** 400)
+        for method in ("public", "invitation"):
+            for field in ("max_total_bytes", "max_files"):
+                for value in bad:
+                    with self.subTest(method=method, field=field, value=repr(value)):
+                        args = {field: value}
+                        if method == "public":
+                            call = lambda: self.reg.create_public_session(**args)
+                        else:
+                            settings = dict(
+                                production="Example", shoot_date="2026-10-27",
+                                shoot_slug="unit", contributor_slug="crew",
+                                contributor_label="Crew", ttl_s=3600,
+                                max_total_bytes=1000, max_files=5
+                            )
+                            settings.update(args)
+                            call = lambda: self.reg.create_invitation(**settings)
+                        with self.assertRaisesRegex(ValueError, field):
+                            call()
+
+    def test_valid_fractional_ttl_zero_grace_and_disabled_quotas(self):
+        iid, token = self.reg.create_invitation(
+            "Example", "2026-10-27", "unit", "crew", "Crew",
+            ttl_s=1800.25, max_total_bytes=0, max_files=0,
+            finish_grace_s=0
+        )
+        record = self.reg.invitation_for_token(token)
+        self.assertEqual(record["id"], iid)
+        self.assertEqual(record["max_total_bytes"], 0)
+        self.assertEqual(record["max_files"], 0)
+        self.assertEqual(record["finish_grace_s"], 0)
+        self.assertAlmostEqual(record["expires_at"] - record["created_at"], 1800.25, places=4)
+        _, pub_token = self.reg.create_public_session(ttl_s=3600.5,
+                                                      max_total_bytes=0, max_files=0)
+        pub = self.reg.invitation_for_token(pub_token)
+        self.assertIsNotNone(pub)
+        self.assertEqual(pub["max_total_bytes"], 0)
+        self.assertEqual(pub["max_files"], 0)
+        self.assertTrue(math.isfinite(pub["expires_at"]))
 
     def test_capabilities_unique_and_hashed_at_rest(self):
         self.assertNotEqual(self.t1,self.t2)
