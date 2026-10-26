@@ -206,6 +206,27 @@ content.** A deployed API must independently authenticate the completing
 actor and check storage responses against the actual uploaded object; these
 public modules do not implement that HTTP/storage verification.
 
+## Worker content-hash provenance validation
+
+When a successful processing job supplies `sha256` or `sha1` in its
+result JSON, the registry now requires a hexadecimal digest of exactly
+64 or 40 characters respectively, **before** changing the job or its
+asset metadata. Hashes are canonicalised to lowercase in the stored
+result and asset catalogue so uppercase/lowercase spelling cannot
+prevent detection of identical content. The SHA-1 field remains optional;
+a successful job may omit both hashes when no content digest is available.
+
+Malformed results cannot consume the current lease, mark a job complete,
+or insert an invalid hash into the cross-asset `duplicate_of` index.
+Synthetic SQLite tests cover invalid digests, unchanged job/asset/event
+state, canonicalised duplicate matching and success without hashes.
+
+**Trust boundary:** syntax validation is not independent verification of
+object bytes, worker identity, or B2 storage metadata. A deployed worker
+must actually hash the correct downloaded source and the service must
+authenticate that worker and its lease. This change affects the public
+registry library only, not the deployed ingestion or deduplication pipeline.
+
 ## Worker lease owner identity
 
 The registry rejects a missing, empty or malformed worker owner ID
