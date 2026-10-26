@@ -124,6 +124,58 @@ class PublicIntakeTest(unittest.TestCase):
         self.assertEqual([tuple(row) for row in jobs], [("process", "queued")])
         self.assertEqual(self.reg.get_asset(uid)["status"], "completed")
 
+    def test_upload_activity_state_is_monotonic(self):
+        asset, kind = self.reserve(self.t1, name="monotonic.mov")
+        self.assertEqual(kind, "new")
+        uid = asset["asset_id"]
+
+        # Duplicate and forward transitions are valid. Upload completion
+        # remains a separate operation, not an activity state.
+        self.assertTrue(self.reg.touch(uid, status="reserved"))
+        self.assertTrue(self.reg.touch(uid, status="uploading"))
+        self.assertTrue(self.reg.touch(uid, status="uploading"))
+        self.assertTrue(self.reg.touch(uid))
+        with self.reg.tx() as c:
+            before = c.execute(
+                "SELECT status, updated_at, last_activity_at FROM assets WHERE asset_id=?",
+                (uid,),
+            ).fetchone()
+        self.assertEqual(before["status"], "uploading")
+
+        # A late request from the earlier 'reserved' phase cannot regress
+        # either state or timestamps. No process job may appear prematurely.
+        self.assertFalse(self.reg.touch(uid, status="reserved"))
+        with self.reg.tx() as c:
+            after = c.execute(
+                "SELECT status, updated_at, last_activity_at FROM assets WHERE asset_id=?",
+                (uid,),
+            ).fetchone()
+            self.assertEqual(tuple(before), tuple(after))
+            self.assertEqual(c.execute(
+                "SELECT COUNT(*) FROM jobs WHERE asset_id=?", (uid,)
+            ).fetchone()[0], 0)
+
+        self.assertTrue(self.reg.mark_completed(uid, "version-456", "etag-456", "test"))
+        self.assertFalse(self.reg.touch(uid, status="reserved"))
+        self.assertFalse(self.reg.touch(uid, status="uploading"))
+        self.assertFalse(self.reg.touch(uid))
+        self.assertEqual(self.reg.get_asset(uid)["status"], "completed")
+        with self.reg.tx() as c:
+            self.assertEqual(c.execute(
+                "SELECT kind, status FROM jobs WHERE asset_id=?", (uid,)
+            ).fetchall()[0]["status"], "queued")
+
+    def test_activity_rejects_reversal_after_bind_upload_id(self):
+        asset, _ = self.reserve(self.t1, name="multipart.mov")
+        uid = asset["asset_id"]
+        self.assertTrue(self.reg.bind_upload_id(uid, "synthetic-multipart-id"))
+        self.assertEqual(self.reg.get_asset(uid)["status"], "uploading")
+        self.assertFalse(self.reg.touch(uid, status="reserved"))
+        self.assertEqual(self.reg.get_asset(uid)["s3_upload_id"], "synthetic-multipart-id")
+        self.assertEqual(self.reg.get_asset(uid)["status"], "uploading")
+        self.assertTrue(self.reg.touch(uid, status="uploading"))
+        self.assertTrue(self.reg.touch(uid))
+
     def test_resume_stays_inside_capability(self):
         a,s1=self.reserve(self.t1)
         b,s2=self.reserve(self.t1)

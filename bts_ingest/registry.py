@@ -366,10 +366,15 @@ class Registry:
         now = time.time()
         with self.tx() as c:
             if status is not None:
+                # Never regress 'uploading' to 'reserved'. A stale signing
+                # callback must not undo progress recorded by a newer one.
+                # Check the pre-existing state in this same atomic UPDATE.
+                allowed_prior = ("reserved",) if status == "reserved" else ("reserved", "uploading")
+                placeholders = ",".join("?" for _ in allowed_prior)
                 cur = c.execute(
                     "UPDATE assets SET last_activity_at=?, status=?, updated_at=? "
-                    "WHERE asset_id=? AND status IN ('reserved','uploading')",
-                    (now, status, now, asset_id))
+                    "WHERE asset_id=? AND status IN (" + placeholders + ")",
+                    (now, status, now, asset_id, *allowed_prior))
             else:
                 cur = c.execute(
                     "UPDATE assets SET last_activity_at=?, updated_at=? "
