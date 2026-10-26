@@ -220,6 +220,13 @@ Malformed results cannot consume the current lease, mark a job complete,
 or insert an invalid hash into the cross-asset `duplicate_of` index.
 Synthetic SQLite tests cover invalid digests, unchanged job/asset/event
 state, canonicalised duplicate matching and success without hashes.
+For compatibility with databases written before hash canonicalization,
+duplicate matching compares SHA-256 hexadecimal values with SQLite's
+ASCII case-insensitive collation. A matching index is created when an old
+registry is reopened, without rewriting historical mixed-case hashes.
+An offline reopen-and-match regression confirms an old mixed-case digest
+still links to its original asset. This does not verify worker-supplied
+hashes against bytes actually stored in B2.
 
 **Trust boundary:** syntax validation is not independent verification of
 object bytes, worker identity, or B2 storage metadata. A deployed worker
