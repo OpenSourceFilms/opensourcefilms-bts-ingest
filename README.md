@@ -21,7 +21,7 @@ python3 -B tests/offline_public_intake.py -q
 python3 -B tests/offline_object_key_safety.py -q
 ```
 
-Expected result: **Ran 28 tests, OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
+Expected result: **Ran 30 tests, OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
 
 ### Minimal local registry example
 
@@ -102,8 +102,15 @@ appropriate transition and event/journal behavior.
 
 The supported completion path is `mark_completed()`, which also queues
 a `process` job for worker ingestion; negative terminal outcomes use
-`mark_status()`. Both remain unchanged. Synthetic SQLite regression
-tests verify an invalid touch leaves the asset and job rows unchanged.
+`mark_status()`. Both remain unchanged.
+
+Activity status transitions are **monotonic**:
+`reserved → reserved/uploading`, `uploading → uploading`. A stale
+`touch(status="reserved")` arriving after upload start is refused
+without changing the existing status or timestamps. Timestamp-only
+`touch()` remains supported on either open state. This applies equally
+after an S3 multipart upload ID has been bound. Synthetic SQLite tests
+verify these restrictions without touching object storage.
 
 ## Security and publication boundaries
 
