@@ -22,7 +22,7 @@ python3 -B tests/offline_object_key_safety.py -q
 python3 -B tests/offline_worker_timing.py -q
 ```
 
-Expected result: **44 registry tests, 6 object-key tests, and 4 worker-timing tests, all OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
+Expected result: **44 registry tests, 6 object-key tests, and 7 worker-timing/owner tests, all OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
 
 ### Minimal local registry example
 
@@ -205,6 +205,27 @@ regressions test refused inputs, no side effects, and normal completion.
 content.** A deployed API must independently authenticate the completing
 actor and check storage responses against the actual uploaded object; these
 public modules do not implement that HTTP/storage verification.
+
+## Worker lease owner identity
+
+The registry rejects a missing, empty or malformed worker owner ID
+**before creating a lease or touching the SQLite job/event journal**.
+Previously, `lease_job(owner=None)` could create a leased job with a
+SQL `NULL` owner. Subsequent `lease_owner=?` heartbeat, completion and
+deferral updates cannot match `NULL`, leaving the job stuck until its
+lease expires and consuming an attempt.
+
+Lease, heartbeat, finish and deferral calls now require a nonempty,
+bounded (up to 256 characters), printable ASCII owner without leading or
+trailing whitespace. Synthetic SQLite tests check the original NULL
+failure mode, preservation of attempts/events and established leases on
+invalid owner calls, and the normal valid-owner lifecycle.
+
+**An owner string is not proof of worker identity.** This does not solve
+the separate stale-worker / same-owner lease-fencing race in
+[issue #2](https://github.com/OpenSourceFilms/opensourcefilms-bts-ingest/issues/2);
+that remains dependent on coordinated worker/API changes. No deployed
+worker or API contract has been validated here.
 
 ## Worker scheduling durations
 
