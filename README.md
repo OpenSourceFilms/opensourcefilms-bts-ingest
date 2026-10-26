@@ -19,9 +19,10 @@ Run Python 3.8+ with no additional packages:
 ```bash
 python3 -B tests/offline_public_intake.py -q
 python3 -B tests/offline_object_key_safety.py -q
+python3 -B tests/offline_worker_timing.py -q
 ```
 
-Expected result: **Ran 36 registry tests and 6 object-key tests, OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
+Expected result: **36 registry tests, 6 object-key tests, and 4 worker-timing tests, all OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
 
 ### Minimal local registry example
 
@@ -153,6 +154,31 @@ without changing the existing status or timestamps. Timestamp-only
 `touch()` remains supported on either open state. This applies equally
 after an S3 multipart upload ID has been bound. Synthetic SQLite tests
 verify these restrictions without touching object storage.
+
+## Worker scheduling durations
+
+The worker job registry now validates the time arguments passed to
+`lease_job()`, `heartbeat()` and `defer_job()` **before modifying any
+SQLite rows**. Lease and heartbeat durations must be finite and positive
+and must actually produce a future deadline, not one that rounds down
+to the current Unix timestamp. Deferred retry delays must be finite and
+nonnegative; a zero delay remains a supported immediate retry. Booleans,
+negative values, NaN/infinity, nonnumeric values and impossible
+floating-point deadlines are rejected with `ValueError`.
+
+The existing worker-method signatures and successful return values are
+unchanged. Four disposable-SQLite regressions verify that invalid
+durations cannot consume an attempt, alter an existing lease or strand
+a queued job behind an infinite retry date. Successful heartbeat,
+completion, zero-delay and fractional-delay deferral remain supported.
+
+**Important:** This does *not* fix the separate same-owner, stale-worker
+**lease fencing** race tracked in
+[issue #2](https://github.com/OpenSourceFilms/opensourcefilms-bts-ingest/issues/2).
+That requires per-attempt credentials coordinated with the deployed
+worker/API consumers. The public repository does not contain those
+running services, and the timing validation is not a production
+acceptance test.
 
 ## Security and publication boundaries
 
