@@ -22,7 +22,7 @@ python3 -B tests/offline_object_key_safety.py -q
 python3 -B tests/offline_worker_timing.py -q
 ```
 
-Expected result: **42 registry tests, 6 object-key tests, and 4 worker-timing tests, all OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
+Expected result: **44 registry tests, 6 object-key tests, and 4 worker-timing tests, all OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
 
 ### Minimal local registry example
 
@@ -57,6 +57,20 @@ stage materialises B2 object keys as directories on a RunPod volume;
 the key validation **does not itself guarantee downstream filesystem
 containment**. The new six synthetic test cases enforce the format without
 accessing the real B2 bucket or production footage.
+
+## Bearer capability input validation
+
+Invitation lookup and public-name updates now refuse malformed bearer-token
+values *before* hashing or opening SQLite. Valid issued tokens use the
+`secrets.token_urlsafe()` ASCII alphabet (`A-Z`, `a-z`, `0-9`, `_`,
+`-`) and are bounded to at most 200 characters. Non-string JSON values,
+Unicode, whitespace, control characters and oversized values are treated as
+unauthorised input rather than causing a type-related exception. A
+well-formed but unknown token still returns no invitation or update.
+
+The checks do **not** authenticate a bearer secret beyond the existing
+stored SHA-256 lookup, add HTTP rate limits, or make this extracted core
+a deployable upload service. No issued tokens are printed by the tests.
 
 ## Public-intake provenance flag validation
 

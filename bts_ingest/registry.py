@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -92,6 +93,15 @@ CREATE TABLE IF NOT EXISTS public_sessions (
 
 MAX_ATTEMPTS = 3
 MAX_SQLITE_SIZE_BYTES = (1 << 63) - 1
+
+# secrets.token_urlsafe() emits this ASCII alphabet. Keep previously issued
+# variable-length capabilities valid, but reject malformed untrusted values
+# before hashing, database access or any public-name mutation.
+_BEARER_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{1,200}")
+
+
+def _valid_bearer_token(token):
+    return type(token) is str and _BEARER_TOKEN_RE.fullmatch(token) is not None
 
 
 def _finite_duration(value, field, *, allow_zero=False):
@@ -215,7 +225,7 @@ class Registry:
         Already-reserved assets may keep uploading for finish_grace_s after expiry so a
         long upload started just before the deadline is not stranded half-way.
         """
-        if not token or len(token) > 200:
+        if not _valid_bearer_token(token):
             return None
         with self.tx() as c:
             r = c.execute("SELECT * FROM invitations WHERE token_sha256=?", (sha256_hex(token),)).fetchone()
@@ -267,6 +277,8 @@ class Registry:
     def update_public_name(self, token, name):
         """Modify only this capability's claimed uploader name, not creator identity."""
         name = public_intake.clean_name(name)
+        if not _valid_bearer_token(token):
+            return False
         now = time.time()
         with self.tx() as c:
             row = c.execute(
