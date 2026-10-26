@@ -495,6 +495,38 @@ class PublicIntakeTest(unittest.TestCase):
         self.assertIsNone(self.reg.public_session(self.p2)["uploader_name_claimed"] if False else None)
         self.assertEqual(self.reg.public_session(self.p2)["uploader_name_claimed"],"Tāmara")
 
+    def test_malformed_bearer_values_never_hash_or_open_database(self):
+        # These inputs previously raised TypeError/AttributeError on len()
+        # or .encode(), potentially turning malformed public HTTP input
+        # into an unhandled exception rather than denied capability.
+        invalid_tokens = (
+            None, True, 123, 1.5, b"token", ["token"], {"key": "token"},
+            "", " ", "token with spaces", "token\\nnext", "a\\x00b",
+            "é", "fullwidth-Ａ", "a" * 201,
+        )
+        for token in invalid_tokens:
+            with self.subTest(token=repr(token)):
+                with mock.patch.object(registry, "sha256_hex",
+                                       side_effect=AssertionError("hashed malformed token")):
+                    with mock.patch.object(self.reg, "tx",
+                                           side_effect=AssertionError("opened database")):
+                        self.assertIsNone(self.reg.invitation_for_token(token))
+                        self.assertIsNone(
+                            self.reg.invitation_for_token(token, for_existing_asset=True)
+                        )
+                        self.assertFalse(self.reg.update_public_name(token, "Invalid"))
+        self.assertIsNone(self.reg.public_session(self.p1)["uploader_name_claimed"])
+        self.assertEqual(self.reg.invitation_for_token(self.t1)["id"], self.p1)
+
+    def test_urlsafe_existing_capabilities_remain_accepted(self):
+        self.assertTrue(registry._valid_bearer_token(self.t1))
+        self.assertTrue(registry._valid_bearer_token(self.t2))
+        self.assertEqual(self.reg.invitation_for_token(self.t1)["id"], self.p1)
+        self.assertTrue(self.reg.update_public_name(self.t1, "Valid"))
+        self.assertEqual(self.reg.public_session(self.p1)["uploader_name_claimed"], "Valid")
+        self.assertIsNone(self.reg.invitation_for_token("some-nonexisting-token"))
+        self.assertFalse(self.reg.update_public_name("some-nonexisting-token", "Invalid"))
+
     def test_name_update_rejects_invalid_token_and_legacy(self):
         self.assertFalse(self.reg.update_public_name("made-up", "Eve"))
         lid,legacy=self.reg.create_invitation("ExampleProduction","2026-10-20","unit","crew",
