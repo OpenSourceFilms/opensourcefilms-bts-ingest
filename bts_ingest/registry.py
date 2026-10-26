@@ -337,7 +337,18 @@ class Registry:
         return dict(r) if r else None
 
     def bind_upload_id(self, asset_id, upload_id):
-        """Only open assets may bind/resume an uploadId. A terminal asset never reopens."""
+        """Bind a valid multipart ID to an open asset exactly once.
+
+        The activity clock must advance on the initial bind: stale-upload
+        cleanup reads last_activity_at, not updated_at.
+        """
+        # S3-compatible multipart IDs are printable, non-whitespace ASCII.
+        # Empty, missing and control-bearing IDs must not move a reserved
+        # asset into 'uploading' without a usable external upload handle.
+        if (type(upload_id) is not str or not 1 <= len(upload_id) <= 4096
+                or not upload_id.isascii()
+                or any(not 33 <= ord(ch) <= 126 for ch in upload_id)):
+            raise ValueError("upload_id must be nonempty printable ASCII (1..4096 characters)")
         with self.tx() as c:
             r = c.execute("SELECT s3_upload_id, status FROM assets WHERE asset_id=?", (asset_id,)).fetchone()
             if r is None or r["status"] not in ("reserved", "uploading"):
@@ -345,10 +356,12 @@ class Registry:
             if r["s3_upload_id"] not in (None, upload_id):
                 return False
             if r["s3_upload_id"] is None:
+                now = time.time()
                 cur = c.execute(
-                    "UPDATE assets SET s3_upload_id=?, status='uploading', updated_at=? "
-                    "WHERE asset_id=? AND status IN ('reserved','uploading') AND s3_upload_id IS NULL",
-                    (upload_id, time.time(), asset_id))
+                    "UPDATE assets SET s3_upload_id=?, status='uploading', updated_at=?, "
+                    "last_activity_at=? WHERE asset_id=? AND status IN ('reserved','uploading') "
+                    "AND s3_upload_id IS NULL",
+                    (upload_id, now, now, asset_id))
                 if not cur.rowcount:
                     return False
                 self.event(c, "signer", "asset.multipart_bound", asset_id, upload_id=upload_id)
