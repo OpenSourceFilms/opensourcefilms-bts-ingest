@@ -20,3 +20,5 @@ jobs:
         run: python3 -B tests/offline_public_intake.py -q
       - name: Check BTS object-key segment safety and derived prefixes
         run: python3 -B tests/offline_object_key_safety.py -q
+      - name: Check BTS worker lease and deferral deadline validation
+        run: python3 -B tests/offline_worker_timing.py -q
