@@ -111,13 +111,13 @@ class WorkerDeadlineTests(unittest.TestCase):
         first = self.reg.lease_job("worker", 60)
         self.assertEqual(first["attempt"], 1)
         before = time.time()
-        self.assertTrue(self.reg.defer_job(self.job_id, "worker", 0.25, "short retry"))
+        self.assertTrue(self.reg.defer_job(self.job_id, "worker", 30.25, "short retry"))
         with self.reg.tx() as c:
             queued = c.execute(
                 "SELECT available_at, status FROM jobs WHERE id=?", (self.job_id,)
             ).fetchone()
         self.assertEqual(queued["status"], "queued")
-        self.assertGreaterEqual(queued["available_at"], before + 0.20)
+        self.assertGreaterEqual(queued["available_at"], before + 30.20)
         self.assertIsNone(self.reg.lease_job("another-worker", 30))
 
         with self.reg.tx() as c:
