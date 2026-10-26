@@ -3,6 +3,7 @@
 This is NOT deployed HTTP worker/API acceptance. V1 owner-only leases remain
 supported for old callers and remain unsafe against same-owner stale workers.
 """
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sqlite3
 import sys
@@ -175,6 +176,26 @@ class FencedLeaseTests(unittest.TestCase):
                 self.assertEqual(c.execute(
                     "SELECT COUNT(*) FROM pragma_table_info('jobs') "
                     "WHERE name='lease_token_sha256'").fetchone()[0], 1)
+
+
+    def test_concurrent_legacy_registry_opens_migrate_once(self):
+        with tempfile.TemporaryDirectory(prefix="bts_v1_parallel_") as directory:
+            path = Path(directory) / "old.sqlite3"
+            old_schema = registry.SCHEMA.replace(
+                "  lease_token_sha256 TEXT,    -- optional v2 fencing; legacy leases use NULL\\n", "")
+            with sqlite3.connect(path) as c:
+                c.executescript(old_schema)
+            # Each Registry opens its own SQLite connection, as independent
+            # service startup processes would. A check/ALTER race must never
+            # raise duplicate-column or change preexisting lease state.
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(lambda _: registry.Registry(path), range(12)))
+            self.assertEqual(len(results), 12)
+            with sqlite3.connect(path) as c:
+                self.assertEqual(c.execute(
+                    "SELECT COUNT(*) FROM pragma_table_info('jobs') "
+                    "WHERE name='lease_token_sha256'").fetchone()[0], 1)
+
 
 
 if __name__ == "__main__":
