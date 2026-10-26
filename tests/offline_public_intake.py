@@ -152,6 +152,45 @@ class PublicIntakeTest(unittest.TestCase):
         self.assertEqual(out["uploader_name_claimed"],None)
         self.assertEqual(out["intake_kind"],"public_unclassified")
 
+    def test_legacy_invitation_false_text_cannot_erase_shoot_provenance(self):
+        _, token = self.reg.create_invitation(
+            "LifeR", "2026-10-19", "test-camera", "contributor",
+            "Synthetic Uploader", ttl_s=3600,
+            max_total_bytes=1024, max_files=1,
+        )
+        inv = dict(self.invite(token))
+        self.assertEqual(public_intake.provenance(inv)["shoot_date"], "2026-10-19")
+        for malformed in ("False", "false", "0", "True", "true", "1"):
+            with self.subTest(flag=malformed):
+                record = {**inv, "is_public_intake": malformed}
+                # The old bool(value) silently classified the string
+                # "False" as public intake and erased assigned shoot data.
+                with self.assertRaisesRegex(ValueError, "is_public_intake"):
+                    public_intake.provenance(record)
+                with self.assertRaisesRegex(ValueError, "is_public_intake"):
+                    public_intake.actual_shoot_date(record)
+
+    def test_public_flag_accepts_real_boolean_and_sqlite_integer(self):
+        inv = dict(self.invite(self.t1))
+        for flag in (True, 1):
+            with self.subTest(flag=flag):
+                self.assertTrue(public_intake.is_public({**inv, "is_public_intake": flag}))
+                self.assertIsNone(public_intake.provenance(
+                    {**inv, "is_public_intake": flag})["shoot_date"])
+        for flag in (False, 0):
+            with self.subTest(flag=flag):
+                self.assertFalse(public_intake.is_public({**inv, "is_public_intake": flag}))
+                self.assertEqual(public_intake.provenance(
+                    {**inv, "is_public_intake": flag})["shoot_date"], "0000-00-00")
+
+    def test_malformed_explicit_flags_fail_instead_of_guessing_origin(self):
+        inv = dict(self.invite(self.t1))
+        for malformed in (None, "", "no", 2, -1, 0.0, [], {}):
+            with self.subTest(flag=repr(malformed)):
+                with self.assertRaisesRegex(ValueError, "is_public_intake"):
+                    public_intake.is_public({**inv, "is_public_intake": malformed})
+        self.assertFalse(public_intake.is_public(inv))
+
     def test_session_partition_not_fake_shoot(self):
         inv=self.invite(self.t1)
         self.assertEqual(inv["shoot_date"],"0000-00-00")
