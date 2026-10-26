@@ -23,7 +23,7 @@ python3 -B tests/offline_worker_timing.py -q
 python3 -B tests/offline_fenced_leases.py -q
 ```
 
-Expected result: **44 registry tests, 6 object-key tests, 7 worker-timing/owner tests, and 8 fenced-worker tests, all OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
+Expected result: **44 registry tests, 6 object-key tests, 7 worker-timing/owner tests, and 9 fenced-worker tests, all OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
 
 ### Minimal local registry example
 
