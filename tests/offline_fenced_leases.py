@@ -182,7 +182,7 @@ class FencedLeaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="bts_v1_parallel_") as directory:
             path = Path(directory) / "old.sqlite3"
             old_schema = registry.SCHEMA.replace(
-                "  lease_token_sha256 TEXT,    -- optional v2 fencing; legacy leases use NULL\\n", "")
+                "  lease_token_sha256 TEXT,    -- optional v2 fencing; legacy leases use NULL\n", "")
             with sqlite3.connect(path) as c:
                 c.executescript(old_schema)
             # Each Registry opens its own SQLite connection, as independent
