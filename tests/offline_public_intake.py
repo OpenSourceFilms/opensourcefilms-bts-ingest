@@ -99,13 +99,15 @@ class PublicIntakeTest(unittest.TestCase):
                         if method == "public":
                             call = lambda: self.reg.create_public_session(**args)
                         else:
-                            call = lambda: self.reg.create_invitation(
-                                "Example", "2026-10-27", "unit", "crew",
-                                "Crew", 3600, 1000, 5, **args
+                            settings = dict(
+                                production="Example", shoot_date="2026-10-27",
+                                shoot_slug="unit", contributor_slug="crew",
+                                contributor_label="Crew", ttl_s=3600,
+                                max_total_bytes=1000, max_files=5
                             )
-                        # Avoid duplicate parameter passing in admin path:
-                        # both methods receive their standard args via kwargs.
-                        with self.assertRaises(ValueError):
+                            settings.update(args)
+                            call = lambda: self.reg.create_invitation(**settings)
+                        with self.assertRaisesRegex(ValueError, field):
                             call()
 
     def test_valid_fractional_ttl_zero_grace_and_disabled_quotas(self):
