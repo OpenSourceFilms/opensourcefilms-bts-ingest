@@ -5,6 +5,7 @@ Workers on other pods never open this file; they use the service's /api/worker e
 import contextlib
 import hashlib
 import json
+import math
 import os
 import secrets
 import sqlite3
@@ -93,6 +94,38 @@ MAX_ATTEMPTS = 3
 MAX_SQLITE_SIZE_BYTES = (1 << 63) - 1
 
 
+def _finite_duration(value, field, *, allow_zero=False):
+    """Durations must never create infinite or retroactive bearer links."""
+    if type(value) not in (int, float):
+        raise ValueError(f"{field} must be a finite number")
+    try:
+        seconds = float(value)
+    except (OverflowError, ValueError):
+        raise ValueError(f"{field} must be a finite number") from None
+    if not math.isfinite(seconds) or seconds < 0 or (not allow_zero and seconds == 0):
+        raise ValueError(f"{field} must be finite and {'nonnegative' if allow_zero else 'positive'}")
+    return seconds
+
+
+def _invitation_limits(now, ttl_s, finish_grace_s, max_total_bytes, max_files):
+    """Validate before token generation and any SQL write.
+
+    SQLite stores quotas as signed 64-bit integers and deadlines as REAL.
+    An infinity deadline would unintentionally create a non-expiring link.
+    """
+    ttl_s = _finite_duration(ttl_s, "ttl_s")
+    finish_grace_s = _finite_duration(finish_grace_s, "finish_grace_s", allow_zero=True)
+    expires_at = now + ttl_s
+    if not math.isfinite(expires_at) or expires_at <= now:
+        raise ValueError("ttl_s must produce a finite future expiry")
+    if not math.isfinite(expires_at + finish_grace_s):
+        raise ValueError("finish_grace_s must produce a finite grace deadline")
+    for label, value in (("max_total_bytes", max_total_bytes), ("max_files", max_files)):
+        if type(value) is not int or not 0 <= value <= MAX_SQLITE_SIZE_BYTES:
+            raise ValueError(f"{label} must be a nonnegative SQLite 64-bit integer")
+    return expires_at, finish_grace_s
+
+
 def sha256_hex(s):
     return hashlib.sha256(s.encode()).hexdigest()
 
@@ -135,18 +168,21 @@ class Registry:
     def create_invitation(self, production, shoot_date, shoot_slug, contributor_slug,
                           contributor_label, ttl_s, max_total_bytes, max_files,
                           finish_grace_s=72 * 3600, note=None):
-        token = secrets.token_urlsafe(32)
         now = time.time()
+        expires_at, finish_grace_s = _invitation_limits(
+            now, ttl_s, finish_grace_s, max_total_bytes, max_files
+        )
+        token = secrets.token_urlsafe(32)
         with self.tx() as c:
             cur = c.execute(
                 "INSERT INTO invitations(token_sha256,production,shoot_date,shoot_slug,contributor_slug,"
                 "contributor_label,created_at,expires_at,finish_grace_s,max_total_bytes,max_files,note)"
                 " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (sha256_hex(token), production, shoot_date, shoot_slug, contributor_slug,
-                 contributor_label, now, now + ttl_s, finish_grace_s, max_total_bytes, max_files, note))
+                 contributor_label, now, expires_at, finish_grace_s, max_total_bytes, max_files, note))
             self.event(c, "admin", "invitation.created", invitation_id=cur.lastrowid,
                        production=production, shoot=f"{shoot_date}_{shoot_slug}",
-                       contributor=contributor_slug, expires_at=now + ttl_s)
+                       contributor=contributor_slug, expires_at=expires_at)
         return cur.lastrowid, token
 
     def invitation_for_token(self, token, *, for_existing_asset=False):
@@ -175,8 +211,11 @@ class Registry:
                               max_total_bytes=1 * 1024**4, max_files=2000):
         """Mint a private upload capability without inventing shoot metadata."""
         name = public_intake.clean_name(name)
-        token = secrets.token_urlsafe(32)
         now = time.time()
+        expires_at, finish_grace_s = _invitation_limits(
+            now, ttl_s, 72 * 3600, max_total_bytes, max_files
+        )
+        token = secrets.token_urlsafe(32)
         session_slug = "session-" + secrets.token_hex(12)
         with self.tx() as c:
             cur = c.execute(
@@ -185,7 +224,7 @@ class Registry:
                 "max_total_bytes,max_files,note) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (sha256_hex(token), public_intake.PUBLIC_PRODUCTION,
                  public_intake.PUBLIC_SHOOT_DATE, public_intake.PUBLIC_SHOOT_SLUG,
-                 session_slug, name or "", now, now + ttl_s, 72*3600,
+                 session_slug, name or "", now, expires_at, finish_grace_s,
                  max_total_bytes, max_files, public_intake.PUBLIC_NOTE))
             iid = cur.lastrowid
             c.execute(
