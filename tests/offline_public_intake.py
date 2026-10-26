@@ -161,6 +161,65 @@ class PublicIntakeTest(unittest.TestCase):
                                  content_type="image/png",last_modified=2,bucket="example-bts-objects",
                                  key_fn=lambda uid:f"test/{uid}/b.png")
 
+    def test_negative_reservation_cannot_credit_public_quota(self):
+        # Without input validation, -1000 bytes reduced recorded usage and
+        # permitted a 1050-byte upload against a 100-byte session quota.
+        _, token = self.reg.create_public_session(max_total_bytes=100, max_files=3)
+        inv = self.invite(token)
+        with mock.patch.dict("os.environ", {"BTS_PUBLIC_BYTE_BUDGET": "1000"}):
+            with self.assertRaisesRegex(ValueError, "nonnegative integer"):
+                self.reg.reserve_asset(
+                    inv, name="negative.bin", relative_path=None, size=-1000,
+                    content_type="application/octet-stream", last_modified=None,
+                    bucket="synthetic", key_fn=lambda uid: f"synthetic/{uid}",
+                )
+            with self.assertRaises(registry.QuotaError):
+                self.reg.reserve_asset(
+                    inv, name="oversized.bin", relative_path=None, size=1050,
+                    content_type="application/octet-stream", last_modified=None,
+                    bucket="synthetic", key_fn=lambda uid: f"synthetic/{uid}",
+                )
+        self.assertEqual(self.reg.receipt(inv["id"]), [])
+
+    def test_invalid_reservation_size_types_do_not_mutate_registry(self):
+        inv = self.invite(self.t1)
+        for bad in (-1, True, False, 1.5, "10", None, 1 << 63):
+            with self.subTest(size=repr(bad)):
+                # Fail before allocating an asset ID or calling key_fn.
+                def forbidden_key(_uid):
+                    self.fail("key_fn called on invalid reservation")
+                with self.assertRaisesRegex(ValueError, "size must be"):
+                    self.reg.reserve_asset(
+                        inv, name="invalid.bin", relative_path=None, size=bad,
+                        content_type=None, last_modified=None,
+                        bucket="synthetic", key_fn=forbidden_key,
+                    )
+        self.assertEqual(self.reg.receipt(inv["id"]), [])
+
+    def test_zero_byte_asset_remains_valid_but_ordinary_quota_holds(self):
+        _, token = self.reg.create_public_session(max_total_bytes=100, max_files=3)
+        inv = self.invite(token)
+        with mock.patch.dict("os.environ", {"BTS_PUBLIC_BYTE_BUDGET": "1000"}):
+            empty, status = self.reg.reserve_asset(
+                inv, name="empty.dat", relative_path=None, size=0,
+                content_type="application/octet-stream", last_modified=1,
+                bucket="synthetic", key_fn=lambda uid: f"synthetic/{uid}",
+            )
+            self.assertEqual((empty["size_bytes"], status), (0, "new"))
+            exact, status = self.reg.reserve_asset(
+                inv, name="fits.dat", relative_path=None, size=100,
+                content_type="application/octet-stream", last_modified=2,
+                bucket="synthetic", key_fn=lambda uid: f"synthetic/{uid}",
+            )
+            self.assertEqual((exact["size_bytes"], status), (100, "new"))
+            with self.assertRaises(registry.QuotaError):
+                self.reg.reserve_asset(
+                    inv, name="extra.dat", relative_path=None, size=1,
+                    content_type=None, last_modified=3, bucket="synthetic",
+                    key_fn=lambda uid: f"synthetic/{uid}",
+                )
+        self.assertEqual(len(self.reg.receipt(inv["id"])), 2)
+
     def test_lease_public_context_flag_and_old_invitation_stable(self):
         a,_=self.reserve(self.t1)
         self.reg.mark_completed(a["asset_id"],"v-1","etag","test")

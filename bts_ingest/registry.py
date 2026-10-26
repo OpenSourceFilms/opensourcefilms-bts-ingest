@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS public_sessions (
 """
 
 MAX_ATTEMPTS = 3
+MAX_SQLITE_SIZE_BYTES = (1 << 63) - 1
 
 
 def sha256_hex(s):
@@ -228,7 +229,13 @@ class Registry:
         Legacy invitation semantics remain unchanged. Public resumes require a
         user-confirmed, server-issued asset ID scoped to this private session.
         """
-        fp = sha256_hex(json.dumps([relative_path or name, int(size), last_modified]))
+        # Validate before fingerprinting, quota calculations, creating a key or
+        # opening the transaction. Negative reservations would otherwise
+        # *credit* the quota and let later uploads exceed its capacity.
+        # Bool is an int subclass but cannot represent a file byte length.
+        if type(size) is not int or not 0 <= size <= MAX_SQLITE_SIZE_BYTES:
+            raise ValueError("size must be a nonnegative integer within SQLite's signed 64-bit range")
+        fp = sha256_hex(json.dumps([relative_path or name, size, last_modified]))
         now = time.time()
         with self.tx() as c:
             is_public = c.execute(

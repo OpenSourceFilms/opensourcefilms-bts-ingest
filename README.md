@@ -18,7 +18,7 @@ Run Python 3.8+ with no additional packages:
 python3 -B tests/offline_public_intake.py -q
 ```
 
-Expected result: **Ran 16 tests, OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
+Expected result: **Ran 19 tests, OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
 
 ### Minimal local registry example
 
@@ -36,6 +36,22 @@ with TemporaryDirectory() as directory:
 ```
 
 The example uses a disposable SQLite file and does not contact object storage. A real application must protect the returned bearer token, enforce authentication/quotas at the HTTP boundary, and independently implement and test upload, storage and access controls. **This extract is not a deployable upload service.**
+
+## Strict byte-count and quota contract
+
+Asset reservations require a Python integer `size` between **0 and
+9,223,372,036,854,775,807** (the SQLite signed 64-bit maximum). Zero is
+permitted for an empty file. Negative sizes, floating-point values,
+strings, booleans and out-of-range integers are rejected **before**
+fingerprinting, allocating an asset ID, choosing a storage key, or
+updating quota records.
+
+This validation is important: a negative byte count would otherwise
+reduce the recorded total and allow later reservations to exceed both
+per-session and aggregate public budgets. The offline regression suite
+verifies the attempted bypass is refused. The HTTP upload boundary must
+independently validate all untrusted request fields; the public code
+released here is not the deployed uploader.
 
 ## Security and publication boundaries
 
