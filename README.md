@@ -20,9 +20,10 @@ Run Python 3.8+ with no additional packages:
 python3 -B tests/offline_public_intake.py -q
 python3 -B tests/offline_object_key_safety.py -q
 python3 -B tests/offline_worker_timing.py -q
+python3 -B tests/offline_fenced_leases.py -q
 ```
 
-Expected result: **44 registry tests, 6 object-key tests, and 7 worker-timing/owner tests, all OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
+Expected result: **44 registry tests, 6 object-key tests, 7 worker-timing/owner tests, and 8 fenced-worker tests, all OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
 
 ### Minimal local registry example
 
@@ -271,6 +272,13 @@ unchanged. Four disposable-SQLite regressions verify that invalid
 durations cannot consume an attempt, alter an existing lease or strand
 a queued job behind an infinite retry date. Successful heartbeat,
 completion, zero-delay and fractional-delay deferral remain supported.
+
+**Opt-in fencing candidate:** A versioned lease-token implementation is staged
+for future API/worker integration. Its offline proof and rollout/rollback
+constraints are in [docs/worker-lease-fencing-v2.md](docs/worker-lease-fencing-v2.md).
+Legacy owner-only clients remain vulnerable to the same-owner takeover race
+until all callers are migrated and v1 lease issuance is disabled. The public
+library is not proof of deployed fencing.
 
 **Important:** This does *not* fix the separate same-owner, stale-worker
 **lease fencing** race tracked in
