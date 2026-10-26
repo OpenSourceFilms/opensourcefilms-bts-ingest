@@ -7,7 +7,9 @@ This extracted Python-standard-library package includes the SQLite invitation/as
 ## Components
 
 - **registry**: local SQLite invitation and public-session capabilities, asset reservations, upload state, quotas, jobs, leases and an event journal. Supply an explicit disposable database path with Registry(path) or BTS_REGISTRY_DB. No production-specific database path is compiled into this release.
-- **naming**: safe object filename and storage-key construction.
+- **naming**: safe object filename and storage-key construction. Date and server asset-ID segments are validated
+  before composing the six-part object key; malformed keys cannot be reused
+  to construct derived-storage prefixes.
 - **public_intake**: keeps unknown shoot date and uploader identity as unknown, avoiding invented metadata.
 
 ## Verify offline
@@ -16,6 +18,7 @@ Run Python 3.8+ with no additional packages:
 
 ```bash
 python3 -B tests/offline_public_intake.py -q
+python3 -B tests/offline_object_key_safety.py -q
 ```
 
 Expected result: **Ran 28 tests, OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
@@ -36,6 +39,23 @@ with TemporaryDirectory() as directory:
 ```
 
 The example uses a disposable SQLite file and does not contact object storage. A real application must protect the returned bearer token, enforce authentication/quotas at the HTTP boundary, and independently implement and test upload, storage and access controls. **This extract is not a deployable upload service.**
+
+### Object-key path safety
+
+`original_key()` rejects malformed or path-like `shoot_date` and
+`asset_id` values rather than inserting them directly into a B2 key.
+A shoot date must be a genuine `YYYY-MM-DD` calendar date; the public
+intake's explicit unknown-date sentinel `0000-00-00` remains supported.
+An asset ID must be a bounded ASCII single path component. Ordinary
+server-issued UUIDs and the published date/sentinel layouts are unchanged.
+
+`derived_prefix()` now refuses malformed keys, extra path segments,
+traversal components, invalid dates and year/date mismatches instead of
+blindly splitting and reassembling input. These checks matter when another
+stage materialises B2 object keys as directories on a RunPod volume;
+the key validation **does not itself guarantee downstream filesystem
+containment**. The new six synthetic test cases enforce the format without
+accessing the real B2 bucket or production footage.
 
 ## Strict byte-count and quota contract
 
