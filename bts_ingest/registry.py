@@ -126,6 +126,17 @@ def _invitation_limits(now, ttl_s, finish_grace_s, max_total_bytes, max_files):
     return expires_at, finish_grace_s
 
 
+def _worker_duration(value, field, *, allow_zero=False):
+    """Refuse malformed worker timings before changing jobs or attempts."""
+    seconds = _finite_duration(value, field, allow_zero=allow_zero)
+    now = time.time()
+    deadline = now + seconds
+    if not math.isfinite(deadline) or deadline < now or (
+            not allow_zero and deadline <= now):
+        raise ValueError(f"{field} must produce a finite future deadline")
+    return seconds
+
+
 def sha256_hex(s):
     return hashlib.sha256(s.encode()).hexdigest()
 
@@ -476,8 +487,12 @@ class Registry:
 
     # -- jobs (leased to workers through the service API) -------------------------------------
     def lease_job(self, owner, lease_s):
+        lease_s = _worker_duration(lease_s, "lease_s")
         with self.tx() as c:
             now = time.time()
+            deadline = now + lease_s
+            if not math.isfinite(deadline) or deadline <= now:
+                raise ValueError("lease_s must produce a finite future deadline")
             # Crashed workers spend attempts too; expiry must not bypass the budget.
             c.execute("UPDATE jobs SET status='quarantined', lease_owner=NULL, lease_expires=NULL,"
                       " updated_at=? WHERE status='leased' AND lease_expires <= ? AND attempts >= ?",
@@ -489,7 +504,7 @@ class Registry:
             if j is None:
                 return None
             c.execute("UPDATE jobs SET status='leased', lease_owner=?, lease_expires=?, attempts=attempts+1,"
-                      " updated_at=? WHERE id=?", (owner, now + lease_s, now, j["id"]))
+                      " updated_at=? WHERE id=?", (owner, deadline, now, j["id"]))
             self.event(c, owner, "job.leased", j["asset_id"], job_id=j["id"], attempt=j["attempts"] + 1)
             a = c.execute("SELECT * FROM assets WHERE asset_id=?", (j["asset_id"],)).fetchone()
             inv = c.execute("SELECT i.production, i.shoot_date, i.shoot_slug, i.contributor_slug,"
@@ -500,11 +515,15 @@ class Registry:
                 "invitation": {**dict(inv), "is_public_intake": inv["public_invitation_id"] is not None}}
 
     def heartbeat(self, job_id, owner, lease_s):
+        lease_s = _worker_duration(lease_s, "lease_s")
         with self.tx() as c:
             now = time.time()
+            deadline = now + lease_s
+            if not math.isfinite(deadline) or deadline <= now:
+                raise ValueError("lease_s must produce a finite future deadline")
             cur = c.execute("UPDATE jobs SET lease_expires=?, updated_at=? WHERE id=? AND lease_owner=?"
                             " AND status='leased' AND lease_expires>?",
-                            (now + lease_s, now, job_id, owner, now))
+                            (deadline, now, job_id, owner, now))
         return bool(cur.rowcount)
 
     def finish_job(self, job_id, owner, ok, result=None, error=None, quarantine=False):
@@ -537,12 +556,16 @@ class Registry:
 
     def defer_job(self, job_id, owner, delay_s, reason):
         """Give a job back without spending an attempt (e.g. no scratch space right now)."""
+        delay_s = _worker_duration(delay_s, "delay_s", allow_zero=True)
         with self.tx() as c:
             now = time.time()
+            available_at = now + delay_s
+            if not math.isfinite(available_at) or available_at < now:
+                raise ValueError("delay_s must produce a finite retry deadline")
             cur = c.execute("UPDATE jobs SET status='queued', lease_owner=NULL, lease_expires=NULL,"
                             " attempts=MAX(attempts-1,0), available_at=?, error=?, updated_at=?"
                             " WHERE id=? AND lease_owner=? AND status='leased' AND lease_expires>?",
-                            (now + delay_s, f"deferred: {reason}", now, job_id, owner, now))
+                            (available_at, f"deferred: {reason}", now, job_id, owner, now))
             if cur.rowcount:
                 j = c.execute("SELECT asset_id FROM jobs WHERE id=?", (job_id,)).fetchone()
                 self.event(c, owner, "job.deferred", j["asset_id"], job_id=job_id, reason=reason, delay_s=delay_s)
