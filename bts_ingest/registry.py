@@ -236,8 +236,10 @@ class Registry:
         if type(size) is not int or not 0 <= size <= MAX_SQLITE_SIZE_BYTES:
             raise ValueError("size must be a nonnegative integer within SQLite's signed 64-bit range")
         fp = sha256_hex(json.dumps([relative_path or name, size, last_modified]))
-        now = time.time()
         with self.tx() as c:
+            # Read time only after acquiring the SQLite write lock. A caller
+            # may have been waiting for that lock while the link expired.
+            now = time.time()
             # invitation_for_token() may have returned this row earlier.
             # Revocation/expiry can change before we acquire the writer lock.
             # Never rely on the caller's cached invitation for admission or
