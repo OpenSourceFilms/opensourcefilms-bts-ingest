@@ -18,7 +18,7 @@ Run Python 3.8+ with no additional packages:
 python3 -B tests/offline_public_intake.py -q
 ```
 
-Expected result: **Ran 19 tests, OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
+Expected result: **Ran 26 tests, OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
 
 ### Minimal local registry example
 
@@ -49,9 +49,27 @@ updating quota records.
 This validation is important: a negative byte count would otherwise
 reduce the recorded total and allow later reservations to exceed both
 per-session and aggregate public budgets. The offline regression suite
-verifies the attempted bypass is refused. The HTTP upload boundary must
-independently validate all untrusted request fields; the public code
-released here is not the deployed uploader.
+verifies the attempted bypass is refused.
+
+## Invitation revocation, expiry and upload-resume grace
+
+When `reserve_asset()` is called with an invitation row retrieved earlier,
+the registry **rechecks the current invitation** under the same SQLite write
+transaction that reserves the asset. A revoked or missing invitation cannot
+create or resume a reservation. New reservations cannot be made after
+`expires_at`, even during the configured `finish_grace_s` interval.
+An asset already reserved while an invitation was valid can still be
+resumed within that interval using the existing per-session public asset ID
+(or the legacy invitation's matching open-asset fingerprint). Neither
+kind of resume is available after the grace deadline. Quota admission reads
+`max_files` and `max_total_bytes` from the **live** invitation record, not
+cached caller-supplied fields.
+
+This closes a stale-invitation gap in the *published registry library*. It
+is not proof that a deployed HTTP service passes the same checks or that a
+bearer token has been authenticated. The upload boundary must independently
+validate untrusted request fields, authorize access and protect signing and
+object storage; this public code is not the deployed uploader.
 
 ## Security and publication boundaries
 

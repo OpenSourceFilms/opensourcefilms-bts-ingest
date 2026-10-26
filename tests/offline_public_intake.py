@@ -7,6 +7,7 @@ import pathlib
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -160,6 +161,140 @@ class PublicIntakeTest(unittest.TestCase):
             self.reg.reserve_asset(inv,name="b.png",relative_path=None,size=101,
                                  content_type="image/png",last_modified=2,bucket="example-bts-objects",
                                  key_fn=lambda uid:f"test/{uid}/b.png")
+
+    def test_cached_public_invitation_revocation_prevents_reservation(self):
+        # A previous successful bearer-token lookup is not a future grant.
+        cached = self.invite(self.t1)
+        self.reg.revoke_invitation(self.p1)
+        self.assertIsNone(self.invite(self.t1))
+        with self.assertRaisesRegex(ValueError, "revoked"):
+            self.reg.reserve_asset(
+                cached, name="stale.mov", relative_path=None, size=99,
+                content_type="video/quicktime", last_modified=None,
+                bucket="synthetic", key_fn=lambda uid: self.fail("allocated asset after revocation"),
+            )
+        self.assertEqual(self.reg.receipt(self.p1), [])
+
+    def test_public_expiry_rejects_new_reservations_in_finish_grace(self):
+        cached = self.invite(self.t1)
+        with self.reg.tx() as c:
+            c.execute(
+                "UPDATE invitations SET expires_at=?, finish_grace_s=3600 WHERE id=?",
+                (time.time() - 10, self.p1),
+            )
+        self.assertIsNone(self.invite(self.t1))
+        self.assertIsNotNone(self.reg.invitation_for_token(self.t1, for_existing_asset=True))
+        with self.assertRaisesRegex(ValueError, "Expired public invitation"):
+            self.reg.reserve_asset(
+                cached, name="new.mov", relative_path=None, size=99,
+                content_type="video/quicktime", last_modified=None,
+                bucket="synthetic", key_fn=lambda uid: self.fail("allocated a new expired asset"),
+            )
+        self.assertEqual(self.reg.receipt(self.p1), [])
+
+    def test_public_expired_grace_allows_only_scoped_existing_resume(self):
+        original, status = self.reserve(self.t1, name="resume.mov")
+        self.assertEqual(status, "new")
+        with self.reg.tx() as c:
+            c.execute(
+                "UPDATE invitations SET expires_at=?, finish_grace_s=3600 WHERE id=?",
+                (time.time() - 10, self.p1),
+            )
+        stale = self.reg.invitation_for_token(self.t1, for_existing_asset=True)
+        self.assertIsNotNone(stale)
+        existing, kind = self.reg.reserve_asset(
+            stale, name="resume.mov", relative_path="camera/resume.mov",
+            size=1234, content_type="video/quicktime", last_modified=10,
+            bucket="synthetic", key_fn=lambda uid: self.fail("resume allocated a new key"),
+            resume_asset_id=original["asset_id"],
+        )
+        self.assertEqual((existing["asset_id"], kind), (original["asset_id"], "resume"))
+        self.assertEqual(len(self.reg.receipt(self.p1)), 1)
+        with self.assertRaisesRegex(ValueError, "Expired public invitation"):
+            self.reg.reserve_asset(
+                stale, name="fresh.mov", relative_path="camera/fresh.mov",
+                size=1, content_type=None, last_modified=None, bucket="synthetic",
+                key_fn=lambda uid: self.fail("new asset during grace"),
+                create_distinct=True,
+            )
+
+    def test_public_revocation_disables_resume_in_finish_grace(self):
+        original, _ = self.reserve(self.t1, name="resume.mov")
+        cached = self.invite(self.t1)
+        self.reg.revoke_invitation(self.p1)
+        with self.assertRaisesRegex(ValueError, "revoked"):
+            self.reg.reserve_asset(
+                cached, name="resume.mov", relative_path="camera/resume.mov",
+                size=1234, content_type=None, last_modified=10,
+                bucket="synthetic", key_fn=lambda uid: self.fail("revoked resume"),
+                resume_asset_id=original["asset_id"],
+            )
+
+    def test_expired_past_grace_disallows_even_existing_resume(self):
+        original, _ = self.reserve(self.t1, name="resume.mov")
+        cached = self.invite(self.t1)
+        with self.reg.tx() as c:
+            c.execute(
+                "UPDATE invitations SET expires_at=?, finish_grace_s=30 WHERE id=?",
+                (time.time() - 60, self.p1),
+            )
+        with self.assertRaisesRegex(ValueError, "beyond upload finish grace"):
+            self.reg.reserve_asset(
+                cached, name="resume.mov", relative_path="camera/resume.mov",
+                size=1234, content_type=None, last_modified=10,
+                bucket="synthetic", key_fn=lambda uid: self.fail("late resume"),
+                resume_asset_id=original["asset_id"],
+            )
+
+    def test_legacy_expired_grace_retains_open_resume_but_not_new_asset(self):
+        iid, token = self.reg.create_invitation(
+            "ExampleProduction", "2026-10-20", "unit", "crew", "Crew",
+            3600, 10000, 5,
+        )
+        inv = self.invite(token)
+        existing, _ = self.reserve(token, name="legacy.mov")
+        with self.reg.tx() as c:
+            c.execute(
+                "UPDATE invitations SET expires_at=?, finish_grace_s=3600 WHERE id=?",
+                (time.time() - 10, iid),
+            )
+        reused, kind = self.reg.reserve_asset(
+            inv, name="legacy.mov", relative_path="camera/legacy.mov",
+            size=1234, content_type=None, last_modified=10,
+            bucket="synthetic", key_fn=lambda uid: self.fail("legacy resume key"),
+        )
+        self.assertEqual((reused["asset_id"], kind), (existing["asset_id"], "resume"))
+        with self.assertRaisesRegex(ValueError, "Expired invitation"):
+            self.reg.reserve_asset(
+                inv, name="legacy-new.mov", relative_path=None, size=1,
+                content_type=None, last_modified=None, bucket="synthetic",
+                key_fn=lambda uid: self.fail("expired legacy new key"),
+            )
+
+    def test_cached_capability_cannot_increase_live_quota(self):
+        _, token = self.reg.create_public_session(max_total_bytes=100, max_files=1)
+        inv = dict(self.invite(token))
+        # Simulates stale/untrusted cached quota fields. DB wins.
+        inv["max_total_bytes"] = 1000000
+        inv["max_files"] = 1000000
+        with self.assertRaises(registry.QuotaError):
+            self.reg.reserve_asset(
+                inv, name="oversized.mov", relative_path=None, size=101,
+                content_type=None, last_modified=None, bucket="synthetic",
+                key_fn=lambda uid: self.fail("quota overrun"),
+            )
+        first, status = self.reg.reserve_asset(
+            inv, name="first.mov", relative_path=None, size=50,
+            content_type=None, last_modified=None, bucket="synthetic",
+            key_fn=lambda uid: f"synthetic/{uid}",
+        )
+        self.assertEqual((first["size_bytes"], status), (50, "new"))
+        with self.assertRaises(registry.QuotaError):
+            self.reg.reserve_asset(
+                inv, name="second.mov", relative_path=None, size=1,
+                content_type=None, last_modified=None, bucket="synthetic",
+                key_fn=lambda uid: self.fail("file count overrun"),
+            )
 
     def test_negative_reservation_cannot_credit_public_quota(self):
         # Without input validation, -1000 bytes reduced recorded usage and

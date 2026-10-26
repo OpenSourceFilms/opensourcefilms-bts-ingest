@@ -236,10 +236,25 @@ class Registry:
         if type(size) is not int or not 0 <= size <= MAX_SQLITE_SIZE_BYTES:
             raise ValueError("size must be a nonnegative integer within SQLite's signed 64-bit range")
         fp = sha256_hex(json.dumps([relative_path or name, size, last_modified]))
-        now = time.time()
         with self.tx() as c:
+            # Read time only after acquiring the SQLite write lock. A caller
+            # may have been waiting for that lock while the link expired.
+            now = time.time()
+            # invitation_for_token() may have returned this row earlier.
+            # Revocation/expiry can change before we acquire the writer lock.
+            # Never rely on the caller's cached invitation for admission or
+            # quota limits: this check shares the asset INSERT transaction.
+            current = c.execute(
+                "SELECT * FROM invitations WHERE id=?", (inv["id"],)
+            ).fetchone()
+            if (current is None or current["revoked_at"] is not None
+                    or current["token_sha256"] != inv["token_sha256"]):
+                raise ValueError("Reservation invitation missing, revoked or changed")
+            expired = now >= current["expires_at"]
+            if expired and now >= current["expires_at"] + current["finish_grace_s"]:
+                raise ValueError("Reservation invitation expired beyond upload finish grace")
             is_public = c.execute(
-                "SELECT 1 FROM public_sessions WHERE invitation_id=?", (inv["id"],)
+                "SELECT 1 FROM public_sessions WHERE invitation_id=?", (current["id"],)
             ).fetchone() is not None
             if is_public:
                 if resume_asset_id and create_distinct:
@@ -252,6 +267,8 @@ class Registry:
                     if existing is None:
                         raise ValueError("Resume asset unavailable for this upload session")
                     return dict(existing), "resume"
+                if expired:
+                    raise ValueError("Expired public invitation cannot reserve a new original")
                 if not create_distinct:
                     prior_open = c.execute(
                         "SELECT * FROM assets WHERE invitation_id=? AND fingerprint=? "
@@ -269,13 +286,17 @@ class Registry:
                     "AND status IN ('reserved','uploading','completed') ORDER BY created_at DESC",
                     (inv["id"], fp)).fetchone()
                 if prev is not None:
+                    if expired and prev["status"] == "completed":
+                        raise ValueError("Expired invitation cannot access completed duplicate")
                     return dict(prev), ("duplicate" if prev["status"] == "completed" else "resume")
+                if expired:
+                    raise ValueError("Expired invitation cannot reserve a new original")
             used = c.execute("SELECT COUNT(*) n, COALESCE(SUM(size_bytes),0) b FROM assets "
                              "WHERE invitation_id=? AND status IN ('reserved','uploading','completed')",
                              (inv["id"],)).fetchone()
-            if used["n"] + 1 > inv["max_files"]:
+            if used["n"] + 1 > current["max_files"]:
                 raise QuotaError("file count limit for this upload link reached")
-            if used["b"] + int(size) > inv["max_total_bytes"]:
+            if used["b"] + int(size) > current["max_total_bytes"]:
                 raise QuotaError("total size limit for this upload link reached")
             # A common public URL must not allow unlimited new private sessions
             # to bypass one another's budget. Account-level public quota is
