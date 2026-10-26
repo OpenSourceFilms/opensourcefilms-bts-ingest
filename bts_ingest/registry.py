@@ -137,6 +137,19 @@ def _worker_duration(value, field, *, allow_zero=False):
     return seconds
 
 
+def _object_identity(value, field):
+    """Require usable version/ETag metadata before terminal completion.
+
+    These are B2/S3 response identifiers, not proof of a successful HEAD or
+    content verification. The service must independently verify the object.
+    """
+    if (type(value) is not str or not 1 <= len(value) <= 4096
+            or not value.isascii()
+            or any(not 33 <= ord(char) <= 126 for char in value)):
+        raise ValueError(f"{field} must be nonempty printable ASCII (1..4096 characters)")
+    return value
+
+
 def sha256_hex(s):
     return hashlib.sha256(s.encode()).hexdigest()
 
@@ -446,6 +459,14 @@ class Registry:
             return bool(cur.rowcount)
 
     def mark_completed(self, asset_id, version_id, etag, actor):
+        """Complete only with usable, explicitly supplied object identifiers.
+
+        This prevents a missing B2 version or ETag from permanently closing an
+        upload and queuing processing. The caller still must verify the B2
+        object itself; string validation is not remote object verification.
+        """
+        version_id = _object_identity(version_id, "version_id")
+        etag = _object_identity(etag, "etag")
         now = time.time()
         with self.tx() as c:
             cur = c.execute("UPDATE assets SET status='completed', b2_version_id=?, b2_etag=?, completed_at=?,"
