@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS assets (
 CREATE INDEX IF NOT EXISTS assets_inv ON assets(invitation_id, fingerprint);
 CREATE INDEX IF NOT EXISTS assets_status ON assets(status);
 CREATE INDEX IF NOT EXISTS assets_sha256 ON assets(sha256);
+CREATE INDEX IF NOT EXISTS assets_sha256_nocase ON assets(sha256 COLLATE NOCASE);
 CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY,
   asset_id TEXT NOT NULL REFERENCES assets(asset_id),
@@ -626,8 +627,12 @@ class Registry:
             self.event(c, owner, f"job.{status}", j["asset_id"], job_id=job_id, error=error)
             if ok and result and result.get("sha256"):
                 # Compare canonical digests, never arbitrary worker values.
-                dup = c.execute("SELECT asset_id FROM assets WHERE sha256=? AND asset_id<>? ORDER BY completed_at"
-                                " LIMIT 1", (result["sha256"], j["asset_id"])).fetchone()
+                # Older registries may contain uppercase/mixed-case hex from
+                # before worker-result canonicalization. Compare ASCII hex
+                # case-insensitively without rewriting historical asset rows.
+                dup = c.execute("SELECT asset_id FROM assets WHERE sha256 COLLATE NOCASE = ?"
+                                " AND asset_id<>? ORDER BY completed_at LIMIT 1",
+                                (result["sha256"], j["asset_id"])).fetchone()
                 c.execute("UPDATE assets SET sha256=?, sha1=?, duplicate_of=?, updated_at=? WHERE asset_id=?",
                           (result["sha256"], result.get("sha1"), dup["asset_id"] if dup else None, now, j["asset_id"]))
                 if dup:
