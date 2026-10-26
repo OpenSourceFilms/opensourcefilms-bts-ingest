@@ -30,7 +30,22 @@ def field(invitation, key):
     return invitation[key] if key in invitation.keys() else None
 
 def is_public(invitation):
-    return bool(field(invitation, "is_public_intake"))
+    """Read an explicit public-intake flag without truthiness coercion.
+
+    The native worker constructs a bool; SQLite can represent flags as 0/1.
+    A string such as "False" is truthy in Python and would incorrectly
+    discard a legacy invitation's assigned production and shoot metadata.
+    Absence of this field denotes an original legacy invitation; a present
+    but malformed value must be rejected instead of guessed.
+    """
+    if "is_public_intake" not in invitation.keys():
+        return False
+    flag = invitation["is_public_intake"]
+    if type(flag) is bool:
+        return flag
+    if type(flag) is int and flag in (0, 1):
+        return bool(flag)
+    raise ValueError("is_public_intake must be a boolean or SQLite 0/1")
 
 def actual_shoot_date(invitation):
     return None if is_public(invitation) else field(invitation, "shoot_date")
