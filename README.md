@@ -12,9 +12,30 @@ This extracted Python-standard-library package includes the SQLite invitation/as
 
 ## Verify offline
 
-Run Python 3.8+ with no additional packages: python3 -B tests/offline_public_intake.py -q
+Run Python 3.8+ with no additional packages:
 
-The 16 test cases use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
+```bash
+python3 -B tests/offline_public_intake.py -q
+```
+
+Expected result: **Ran 16 tests, OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
+
+### Minimal local registry example
+
+```python
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from bts_ingest.registry import Registry
+
+with TemporaryDirectory() as directory:
+    registry = Registry(Path(directory) / "example.sqlite3")
+    session_id, secret_token = registry.create_public_session()
+    invitation = registry.invitation_for_token(secret_token)
+    assert invitation is not None
+    assert invitation["id"] == session_id
+```
+
+The example uses a disposable SQLite file and does not contact object storage. A real application must protect the returned bearer token, enforce authentication/quotas at the HTTP boundary, and independently implement and test upload, storage and access controls. **This extract is not a deployable upload service.**
 
 ## Security and publication boundaries
 
