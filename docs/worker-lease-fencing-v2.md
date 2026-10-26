@@ -1,0 +1,80 @@
+# Versioned worker-lease fencing: opt-in core and rollout contract
+
+**Status: candidate library API, not deployed or approved as a complete fix.**
+Tracked by [issue #2](https://github.com/OpenSourceFilms/opensourcefilms-bts-ingest/issues/2).
+The public repository contains the SQLite registry but not the actual deployed HTTP
+worker endpoints, worker processes, release controls or live database migrations.
+The code in this branch must not be substituted into the service without a
+coordinated, tested release.
+
+## The safety invariant
+
+Every new fenced lease has a fresh unpredictable 256-bit bearer token, generated
+within the acquiring registry transaction. Only its SHA-256 is stored as
+`jobs.lease_token_sha256`. The token is returned **once** as
+`lease_token` by `lease_job_fenced(owner, lease_s)`, and must be treated as
+sensitive authentication material, separate from the ordinary worker owner label.
+
+For a **fenced** job, all subsequent mutators must authenticate the current
+`job_id`, `owner`, `lease_token`, status `leased` and unexpired deadline
+in the same SQLite writer transaction. The registry exposes optional
+`lease_token=` keyword arguments on `heartbeat`, `finish_job` and
+`defer_job` to support a versioned v2 HTTP contract without changing the
+existing callers' positional argument lists. Requests without a token only
+match **unfenced v1 leases**. On expiry/requeue/quarantine, finish or deferral,
+the stored token hash is cleared. A new acquisition always gets a fresh token,
+even when the process owner and numeric `attempt` are reused. In particular,
+`defer_job` deliberately refunds an attempt, so attempt number alone is not a
+safe fencing credential.
+
+A v2 client cannot safely take a token returned by the registry and then
+call the existing owner-only HTTP heartbeat/finish/defer routes. **The API
+server must explicitly forward the token**. It must also authenticate the
+service caller independently: a token is a lease-scoped capability, not a
+replacement for a worker's service/API authentication.
+
+## Compatibility and explicit limitations
+
+The additive SQLite column is created for fresh databases and migrated
+idempotently when opening an older database. Historical rows receive NULL.
+Old-style `lease_job(owner, lease_s)` and existing positional mutators still
+operate on legacy v1 leases. That is intentional for offline compatibility but
+means **the same-owner stale-worker race remains open for v1 jobs**. This branch
+does not pretend the globally deployed race is fixed and issue #2 must remain
+open.
+
+**Critical mixed-version hazard:** old registry code knows nothing about
+`lease_token_sha256`, so rolling back only the registry implementation while
+v2 jobs are still leased would re-enable unfenced mutations. A supported
+rollback must stop issuing new v2 leases, drain/quarantine existing v2 leases,
+verify no fenced jobs remain, and only then revert the registry/API together.
+
+## Proposed deployment sequence (requires the worker/API owner)
+
+1. **Inventory consumers and backups.** Locate every worker route and caller;
+   confirm actual request and response schemas, retries, idempotency rules,
+   restart behaviour and SQLite migration strategy. Back up the database.
+2. **Stage additive schema.** First deploy software that knows the new column
+   but does not issue fenced leases. Old workers can keep operating on v1
+   while version-skew acceptance is tested against disposable replicas.
+3. **Introduce authenticated v2 routes.** Return the token only to the
+   authorised worker holding the newly acquired job. Require and forward it
+   on every v2 heartbeat, finish and defer. Never expose the token in HTTP
+   access logs, traces, event JSON, public status responses or exception
+   messages. Keep token storage restricted and avoid retry leakage.
+4. **Upgrade all workers and pause v1 issuance.** After every worker is
+   confirmed to use v2 and no v1 worker jobs remain, reject new v1 lease
+   requests at the HTTP boundary and retire legacy mutation endpoints. Do
+   **not** silently fall back from an invalid/missing v2 token to v1.
+5. **Exercise races end to end.** Same owner on attempts N/N+1; two different
+   owners; lease expiry before reacquire; defer/refund and reacquire with the
+   same numeric attempt; delayed heartbeat/finish; process crash; rejected
+   malformed tokens; quarantine and attempt limit; B2 side effects and worker
+   retries. Assert that stale results cannot alter the new attempt.
+6. **Accept rollout only with real evidence.** Record exact API/worker/registry
+   revisions, migration and rollback procedure, success/error rates, and
+   deployment state. Keep production assets and credentials out of GitHub.
+
+The offline test `tests/offline_fenced_leases.py` covers only the registry
+contract on disposable SQLite, **not** HTTP authentication or production
+correctness. Nothing in this patch executes worker jobs or contacts B2.
