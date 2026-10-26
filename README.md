@@ -18,7 +18,7 @@ Run Python 3.8+ with no additional packages:
 python3 -B tests/offline_public_intake.py -q
 ```
 
-Expected result: **Ran 26 tests, OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
+Expected result: **Ran 28 tests, OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
 
 ### Minimal local registry example
 
@@ -70,6 +70,20 @@ is not proof that a deployed HTTP service passes the same checks or that a
 bearer token has been authenticated. The upload boundary must independently
 validate untrusted request fields, authorize access and protect signing and
 object storage; this public code is not the deployed uploader.
+
+## Upload activity cannot mark an asset completed
+
+`Registry.touch()` is an activity/heartbeat operation for open assets.
+An optional status argument may only be `reserved` or `uploading`.
+It rejects `completed`, `aborted`, `failed` and arbitrary values
+**before opening a SQLite transaction**. This prevents an activity call
+from silently switching an asset into a terminal state and bypassing the
+appropriate transition and event/journal behavior.
+
+The supported completion path is `mark_completed()`, which also queues
+a `process` job for worker ingestion; negative terminal outcomes use
+`mark_status()`. Both remain unchanged. Synthetic SQLite regression
+tests verify an invalid touch leaves the asset and job rows unchanged.
 
 ## Security and publication boundaries
 
