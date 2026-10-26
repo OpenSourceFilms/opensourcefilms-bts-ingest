@@ -253,6 +253,83 @@ class PublicIntakeTest(unittest.TestCase):
         self.assertEqual([tuple(row) for row in jobs], [("process", "queued")])
         self.assertEqual(self.reg.get_asset(uid)["status"], "completed")
 
+    def test_completion_rejects_invalid_version_without_terminal_side_effects(self):
+        asset, kind = self.reserve(self.t1, name="missing-version.mov")
+        self.assertEqual(kind, "new")
+        uid = asset["asset_id"]
+        before = self.reg.get_asset(uid)
+        with self.reg.tx() as c:
+            events_before = c.execute(
+                "SELECT COUNT(*) FROM events WHERE asset_id=?", (uid,)
+            ).fetchone()[0]
+        invalid_versions = (
+            None, "", " ", "\nversion", "ver\x00sion", "vérsion",
+            True, 123, b"version", "v" * 4097,
+        )
+        for invalid in invalid_versions:
+            with self.subTest(version=repr(invalid)):
+                with self.assertRaisesRegex(ValueError, "version_id"):
+                    self.reg.mark_completed(uid, invalid, "valid-etag", "worker")
+                self.assertEqual(self.reg.get_asset(uid), before)
+                with self.reg.tx() as c:
+                    self.assertEqual(
+                        c.execute("SELECT COUNT(*) FROM jobs WHERE asset_id=?",
+                                  (uid,)).fetchone()[0], 0
+                    )
+                    self.assertEqual(
+                        c.execute("SELECT COUNT(*) FROM events WHERE asset_id=?",
+                                  (uid,)).fetchone()[0], events_before
+                    )
+
+    def test_completion_rejects_invalid_etag_without_terminal_side_effects(self):
+        asset, _ = self.reserve(self.t1, name="missing-etag.mov")
+        uid = asset["asset_id"]
+        before = self.reg.get_asset(uid)
+        with self.reg.tx() as c:
+            events_before = c.execute(
+                "SELECT COUNT(*) FROM events WHERE asset_id=?", (uid,)
+            ).fetchone()[0]
+        invalid_etags = (
+            None, "", "\t", 'etag\rwith-control', "étag",
+            False, 42, [], "e" * 4097,
+        )
+        for invalid in invalid_etags:
+            with self.subTest(etag=repr(invalid)):
+                with self.assertRaisesRegex(ValueError, "etag"):
+                    self.reg.mark_completed(uid, "valid-version", invalid, "worker")
+                self.assertEqual(self.reg.get_asset(uid), before)
+                with self.reg.tx() as c:
+                    self.assertEqual(
+                        c.execute("SELECT COUNT(*) FROM jobs WHERE asset_id=?",
+                                  (uid,)).fetchone()[0], 0
+                    )
+                    self.assertEqual(
+                        c.execute("SELECT COUNT(*) FROM events WHERE asset_id=?",
+                                  (uid,)).fetchone()[0], events_before
+                    )
+
+    def test_completion_keeps_valid_b2_multipart_etag_and_version_contract(self):
+        asset, _ = self.reserve(self.t1, name="complete-with-identity.mov")
+        uid = asset["asset_id"]
+        etag = '"0123456789abcdef-12"'
+        version = "4_z1234567890abcde_example"
+        self.assertTrue(self.reg.mark_completed(uid, version, etag, "worker"))
+        self.assertFalse(self.reg.mark_completed(uid, version, etag, "worker"))
+        saved = self.reg.get_asset(uid)
+        self.assertEqual(saved["status"], "completed")
+        self.assertEqual(saved["b2_version_id"], version)
+        self.assertEqual(saved["b2_etag"], etag)
+        with self.reg.tx() as c:
+            jobs = c.execute(
+                "SELECT kind,status FROM jobs WHERE asset_id=?", (uid,)
+            ).fetchall()
+            events = c.execute(
+                "SELECT kind FROM events WHERE asset_id=? AND kind='asset.completed'",
+                (uid,),
+            ).fetchall()
+        self.assertEqual([tuple(row) for row in jobs], [("process", "queued")])
+        self.assertEqual(len(events), 1)
+
     def test_upload_activity_state_is_monotonic(self):
         asset, kind = self.reserve(self.t1, name="monotonic.mov")
         self.assertEqual(kind, "new")
