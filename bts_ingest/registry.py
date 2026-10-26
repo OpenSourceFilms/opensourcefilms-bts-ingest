@@ -147,6 +147,20 @@ def _worker_duration(value, field, *, allow_zero=False):
     return seconds
 
 
+def _worker_owner(value):
+    """Require a usable, log-safe lease identity before any SQLite mutation.
+
+    A missing owner would store SQL NULL in jobs.lease_owner; subsequent
+    owner=? predicates can never match NULL, making that lease impossible
+    to heartbeat, finish or defer until expiry consumes an attempt.
+    """
+    if (type(value) is not str or not 1 <= len(value) <= 256
+            or value != value.strip() or not value.isascii()
+            or any(not 32 <= ord(ch) <= 126 for ch in value)):
+        raise ValueError("worker owner must be printable ASCII (1..256 characters)")
+    return value
+
+
 def _object_identity(value, field):
     """Require usable version/ETag metadata before terminal completion.
 
@@ -520,6 +534,7 @@ class Registry:
 
     # -- jobs (leased to workers through the service API) -------------------------------------
     def lease_job(self, owner, lease_s):
+        owner = _worker_owner(owner)
         lease_s = _worker_duration(lease_s, "lease_s")
         with self.tx() as c:
             now = time.time()
@@ -548,6 +563,7 @@ class Registry:
                 "invitation": {**dict(inv), "is_public_intake": inv["public_invitation_id"] is not None}}
 
     def heartbeat(self, job_id, owner, lease_s):
+        owner = _worker_owner(owner)
         lease_s = _worker_duration(lease_s, "lease_s")
         with self.tx() as c:
             now = time.time()
@@ -560,6 +576,7 @@ class Registry:
         return bool(cur.rowcount)
 
     def finish_job(self, job_id, owner, ok, result=None, error=None, quarantine=False):
+        owner = _worker_owner(owner)
         with self.tx() as c:
             now = time.time()
             j = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -589,6 +606,7 @@ class Registry:
 
     def defer_job(self, job_id, owner, delay_s, reason):
         """Give a job back without spending an attempt (e.g. no scratch space right now)."""
+        owner = _worker_owner(owner)
         delay_s = _worker_duration(delay_s, "delay_s", allow_zero=True)
         with self.tx() as c:
             now = time.time()
