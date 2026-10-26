@@ -168,6 +168,47 @@ class WorkerDeadlineTests(unittest.TestCase):
         self.assertEqual(duplicate["sha256"], sha256.lower())
         self.assertEqual(duplicate["duplicate_of"], self.asset_id)
 
+    def test_preexisting_mixed_case_hash_is_still_detected_after_reopen(self):
+        digest = "A1b2" * 16  # valid 64-character hexadecimal value
+        first_job = self.reg.lease_job("prior-worker", 60)
+        self.assertTrue(self.reg.finish_job(first_job["job_id"], "prior-worker",
+                                            True, result={"sha256": digest}))
+        with self.reg.tx() as c:
+            # Model a DB written by an older deployed registry revision.
+            c.execute("UPDATE assets SET sha256=? WHERE asset_id=?",
+                      (digest, self.asset_id))
+        self.reg = registry.Registry(self.reg.path)  # in-place schema upgrade
+        with self.reg.tx() as c:
+            self.assertEqual(
+                c.execute("SELECT sha256 FROM assets WHERE asset_id=?",
+                          (self.asset_id,)).fetchone()["sha256"], digest
+            )
+            self.assertIsNotNone(c.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND name='assets_sha256_nocase'"
+            ).fetchone())
+
+        with mock.patch.dict("os.environ", {"BTS_PUBLIC_BYTE_BUDGET": "1000000"}):
+            _, token = self.reg.create_public_session(max_total_bytes=1000, max_files=5)
+            inv = self.reg.invitation_for_token(token)
+            second, outcome = self.reg.reserve_asset(
+                inv, name="second-legacy-hash.mov", relative_path="second.mov",
+                size=41, content_type="video/quicktime", last_modified=101,
+                bucket="disposable", key_fn=lambda uid: "synthetic/" + uid,
+            )
+            self.assertEqual(outcome, "new")
+            self.assertTrue(self.reg.mark_completed(second["asset_id"],
+                                                    "version", "etag", "test"))
+        second_job = self.reg.lease_job("current-worker", 60)
+        self.assertEqual(second_job["asset"]["asset_id"], second["asset_id"])
+        self.assertTrue(self.reg.finish_job(second_job["job_id"], "current-worker",
+                                            True, result={"sha256": digest.lower()}))
+        match = self.reg.get_asset(second["asset_id"])
+        self.assertEqual(match["sha256"], digest.lower())
+        self.assertEqual(match["duplicate_of"], self.asset_id)
+        # Historical metadata is retained byte-for-byte, not silently migrated.
+        self.assertEqual(self.reg.get_asset(self.asset_id)["sha256"], digest)
+
     def test_success_without_content_hash_still_completes_compatibly(self):
         self.reg.lease_job("worker", 60)
         self.assertTrue(self.reg.finish_job(self.job_id, "worker", True,
