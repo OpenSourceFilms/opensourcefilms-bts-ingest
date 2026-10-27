@@ -59,6 +59,45 @@ v2 jobs are still leased would re-enable unfenced mutations. A supported
 rollback must stop issuing new v2 leases, drain/quarantine existing v2 leases,
 verify no fenced jobs remain, and only then revert the registry/API together.
 
+## Opt-in accepted-derivative reference contract
+
+The draft public package now includes
+[`bts_ingest/derivative_generation.py`](../bts_ingest/derivative_generation.py)
+and [synthetic regression cases](../tests/offline_derivative_generation.py).
+A fenced worker can derive a public, non-credential `generation_prefix`
+using its private `lease_token`. Each derivative must be written under
+`<validated original derived prefix>/_generations/<generation-id>/<safe filename>`
+rather than to a shared latest-object key.
+
+For a successful fenced lease **that reports derivative-publication fields**,
+the registry validates `publication_protocol="generation-scoped-v1"`,
+validates each derivative's B2 key against this generation's prefix,
+requires `sha256`, `version_id` and `bytes`, and rejects reported
+`published_path`/`publish_state` before committing `result_json`.
+The accepted `result_json` then includes the independently recomputed,
+non-secret `generation_prefix`. A stale lease cannot replace that row or
+claim another generation's derivative list. The isolated memory-only test
+models B's acceptance and an even later upload by A; B's accepted key and
+pinned version remain unchanged.
+
+**This is not sufficient production acceptance:**
+- The published registry does not yet require this protocol for successful
+  fenced jobs **without** derivative fields, so v2 API integration must
+  explicitly fail closed on unscoped output-producing successes.
+- The source/API must authenticate the worker and independently verify every
+  reported B2 object, version and digest. A syntactically valid worker
+  manifest is not remote integrity evidence.
+- Readers must retrieve the **accepted** manifest from the registry and
+  GET B2 objects by their recorded **version IDs**. Fetching a latest object
+  by a static key, or using existing local canonical directories, bypasses
+  the acceptance pointer.
+- The development worker currently emits `published_path` from
+  `publish_local` before finish. It will be intentionally incompatible
+  with the fenced derivative publication contract until local output
+  becomes generation-scoped and reader promotion is redesigned.
+- Existing owner-only v1 calls still work, including their existing
+  limitations; no v2 live service or worker has been deployed.
+
 ## Actual BTS service/worker contract, read-only source inspection
 
 The current private BTS development snapshot has these authenticated
