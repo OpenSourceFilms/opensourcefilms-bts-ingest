@@ -26,3 +26,5 @@ jobs:
         run: python3 -B tests/offline_fenced_leases.py -q
       - name: Check version-pinned derivative-generation publication contract
         run: python3 -B tests/offline_derivative_generation.py -q
+      - name: Check v2 gateway remote integrity and claim-expiry races
+        run: python3 -B tests/offline_worker_v2_gateway.py -q
