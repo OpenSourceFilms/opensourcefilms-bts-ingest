@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
+from urllib.parse import quote
 
 from . import derivative_generation, naming
 
@@ -25,7 +27,12 @@ def accepted_generation(reg, job_id):
     """
     if type(job_id) is not int or job_id <= 0:
         raise ValueError("job_id must be a positive integer")
-    with reg.tx() as c:
+    # SQLite mode=ro must not use Registry.tx(), which takes BEGIN IMMEDIATE
+    # and blocks the intake writer even though this lookup does not mutate.
+    # Quote the path so a filename with '?' or '#' cannot alter URI options.
+    uri = "file:" + quote(reg.path, safe="/") + "?mode=ro"
+    with sqlite3.connect(uri, uri=True, timeout=30) as c:
+        c.row_factory = sqlite3.Row
         row = c.execute(
             "SELECT j.status,j.accepted_generation_prefix,j.result_json,"
             " a.asset_id,a.b2_key FROM jobs j"
