@@ -21,9 +21,10 @@ python3 -B tests/offline_public_intake.py -q
 python3 -B tests/offline_object_key_safety.py -q
 python3 -B tests/offline_worker_timing.py -q
 python3 -B tests/offline_fenced_leases.py -q
+python3 -B tests/offline_derivative_generation.py -q
 ```
 
-Expected result: **44 registry tests, 6 object-key tests, 7 worker-timing/owner tests, and 9 fenced-worker tests, all OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
+Expected result: **44 registry tests, 6 object-key tests, 7 worker-timing/owner tests, and 9 fenced-worker tests, and 5 derivative-generation tests, all OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
 
 ### Minimal local registry example
 
@@ -272,6 +273,14 @@ unchanged. Four disposable-SQLite regressions verify that invalid
 durations cannot consume an attempt, alter an existing lease or strand
 a queued job behind an infinite retry date. Successful heartbeat,
 completion, zero-delay and fractional-delay deferral remain supported.
+
+**Derivative acceptance prototype:** Fenced success results carrying derivative
+objects must reference objects under the current lease's domain-separated
+`_generations/` namespace, pin B2 version IDs and SHA-256 claims, and omit
+pre-accepted canonical local publication paths. A synthetic memory-only
+interleaving proves the recorded accepted B result survives a late A upload
+to A's separate namespace. **Real B2 verification and canonical reader
+migration are not implemented.** Unfenced v1 processing remains unchanged.
 
 **Opt-in fencing candidate:** A versioned lease-token implementation is staged
 for future API/worker integration. Its offline proof and rollout/rollback
