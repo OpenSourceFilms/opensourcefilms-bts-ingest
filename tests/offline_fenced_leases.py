@@ -30,7 +30,8 @@ class FencedLeaseTests(unittest.TestCase):
             asset, outcome = self.reg.reserve_asset(
                 inv, name="synthetic.mov", relative_path="camera/synthetic.mov",
                 size=123, content_type="video/quicktime", last_modified=100,
-                bucket="disposable", key_fn=lambda uid: "synthetic/" + uid,
+                bucket="disposable", key_fn=lambda uid: (
+                    "osf/0000/0000-00-00_unknown/source/" + uid + "/synthetic.mov"),
             )
             self.assertEqual(outcome, "new")
             self.assertTrue(self.reg.mark_completed(asset["asset_id"], "v", "etag", "test"))
