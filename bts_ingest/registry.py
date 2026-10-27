@@ -664,10 +664,10 @@ class Registry:
             # prevents a stale worker's subsequent shared-key B2 upload from
             # becoming the recorded successful result. The API must still
             # verify remote object versions independently.
-            if ok and token_hash is not None and result is not None and any(
-                    k in result for k in (
-                        "derivatives", "publication_protocol", "published_path",
-                        "publish_state", "generation_prefix")):
+            if ok and token_hash is not None:
+                # A fenced success must explicitly declare a scoped result,
+                # even when no derivative was produced (unsupported media).
+                # Never silently accept a v1/fixed-key publication as v2.
                 asset = c.execute("SELECT b2_key FROM assets WHERE asset_id=?",
                                   (j["asset_id"],)).fetchone()
                 prefix = derivative_generation.generation_prefix(asset["b2_key"], lease_token)
