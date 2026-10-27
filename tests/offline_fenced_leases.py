@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from bts_ingest import registry
 
+EMPTY_MANIFEST = {"publication_protocol": "generation-scoped-v1", "derivatives": []}
+
 
 class FencedLeaseTests(unittest.TestCase):
     def setUp(self):
@@ -58,7 +60,7 @@ class FencedLeaseTests(unittest.TestCase):
         self.assertEqual(self.row(), row)
         self.assertTrue(self.reg.heartbeat(self.job_id, "worker", 60, lease_token=token))
         self.assertTrue(self.reg.finish_job(self.job_id, "worker", True,
-                                            result={"sha256": "A" * 64},
+                                            result={**EMPTY_MANIFEST, "sha256": "A" * 64},
                                             lease_token=token))
         self.assertEqual(self.row()["status"], "done")
         self.assertIsNone(self.row()["lease_token_sha256"])
@@ -83,6 +85,7 @@ class FencedLeaseTests(unittest.TestCase):
         self.assertTrue(self.reg.heartbeat(self.job_id, "same-worker", 60,
                                            lease_token=second["lease_token"]))
         self.assertTrue(self.reg.finish_job(self.job_id, "same-worker", True,
+                                            result=EMPTY_MANIFEST,
                                             lease_token=second["lease_token"]))
 
     def test_other_owner_and_wrong_token_are_rejected(self):
@@ -100,6 +103,7 @@ class FencedLeaseTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "lease token"):
                     self.reg.heartbeat(self.job_id, "worker-A", 60, lease_token=token)
         self.assertTrue(self.reg.finish_job(self.job_id, "worker-A", True,
+                                            result=EMPTY_MANIFEST,
                                             lease_token=lease["lease_token"]))
 
     def test_defer_reacquire_even_when_attempt_number_repeats(self):
@@ -118,6 +122,7 @@ class FencedLeaseTests(unittest.TestCase):
                                             lease_token=first["lease_token"]))
         self.assertEqual(self.row(), before)
         self.assertTrue(self.reg.finish_job(self.job_id, "worker", True,
+                                            result=EMPTY_MANIFEST,
                                             lease_token=second["lease_token"]))
 
     def test_expiration_is_invalid_even_before_new_lease(self):
