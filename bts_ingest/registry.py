@@ -13,7 +13,7 @@ import sqlite3
 import time
 import uuid
 
-from . import public_intake
+from . import derivative_generation, public_intake
 
 DEFAULT_DB = os.environ.get("BTS_REGISTRY_DB")
 
@@ -659,6 +659,20 @@ class Registry:
                     or j["lease_token_sha256"] != token_hash
                     or j["lease_expires"] is None or j["lease_expires"] <= now):
                 return False
+            # Opt-in v2 publication contract: only generation-specific,
+            # version-pinned derivative references can be accepted. This
+            # prevents a stale worker's subsequent shared-key B2 upload from
+            # becoming the recorded successful result. The API must still
+            # verify remote object versions independently.
+            if ok and token_hash is not None and result is not None and any(
+                    k in result for k in (
+                        "derivatives", "publication_protocol", "published_path",
+                        "publish_state", "generation_prefix")):
+                asset = c.execute("SELECT b2_key FROM assets WHERE asset_id=?",
+                                  (j["asset_id"],)).fetchone()
+                prefix = derivative_generation.generation_prefix(asset["b2_key"], lease_token)
+                derivative_generation.validate_manifest(asset["b2_key"], lease_token, result)
+                result = {**result, "generation_prefix": prefix}
             if ok:
                 status = "done"
             elif quarantine or j["attempts"] >= MAX_ATTEMPTS:
