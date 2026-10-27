@@ -161,8 +161,9 @@ class FencedLeaseTests(unittest.TestCase):
     def test_migrate_legacy_database_in_place_without_rewriting_jobs(self):
         with tempfile.TemporaryDirectory(prefix="bts_v1_db_") as directory:
             path = Path(directory) / "old.sqlite3"
-            old_schema = registry.SCHEMA.replace(
+            old_schema = (registry.SCHEMA.replace(
                 "  lease_token_sha256 TEXT,    -- optional v2 fencing; legacy leases use NULL\n", "")
+                .replace("  accepted_generation_prefix TEXT, -- durable v2 winner, NULL for legacy/unaccepted\n", ""))
             with sqlite3.connect(path) as c:
                 c.executescript(old_schema)
                 c.execute("INSERT INTO jobs(asset_id,kind,status,attempts,"
@@ -174,6 +175,7 @@ class FencedLeaseTests(unittest.TestCase):
             with upgraded.tx() as c:
                 cols = {r[1] for r in c.execute("PRAGMA table_info(jobs)")}
                 self.assertIn("lease_token_sha256", cols)
+                self.assertIn("accepted_generation_prefix", cols)
                 row = c.execute("SELECT attempts,lease_owner,lease_token_sha256 FROM jobs").fetchone()
                 self.assertEqual((row["attempts"], row["lease_owner"],
                                   row["lease_token_sha256"]), (1, "old-worker", None))
@@ -187,8 +189,9 @@ class FencedLeaseTests(unittest.TestCase):
     def test_concurrent_legacy_registry_opens_migrate_once(self):
         with tempfile.TemporaryDirectory(prefix="bts_v1_parallel_") as directory:
             path = Path(directory) / "old.sqlite3"
-            old_schema = registry.SCHEMA.replace(
+            old_schema = (registry.SCHEMA.replace(
                 "  lease_token_sha256 TEXT,    -- optional v2 fencing; legacy leases use NULL\n", "")
+                .replace("  accepted_generation_prefix TEXT, -- durable v2 winner, NULL for legacy/unaccepted\n", ""))
             with sqlite3.connect(path) as c:
                 c.executescript(old_schema)
             # Each Registry opens its own SQLite connection, as independent
