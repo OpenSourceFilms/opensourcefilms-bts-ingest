@@ -42,7 +42,9 @@ class ReaderTests(unittest.TestCase):
         manifest=self.manifest(l["lease_token"])
         self.assertTrue(self.reg.finish_job(self.job,"worker",True,result=manifest,
                                             lease_token=l["lease_token"]))
-        ptr=accepted_derivatives.accepted_generation(self.reg,self.job)
+        # The resolver is a true read-side path, not BEGIN IMMEDIATE.
+        with mock.patch.object(self.reg, "tx", side_effect=AssertionError("writer lock used")):
+            ptr=accepted_derivatives.accepted_generation(self.reg,self.job)
         self.assertEqual(ptr["derivatives"][0]["b2_key"],manifest["derivatives"][0]["b2_key"])
         self.assertEqual(ptr["derivatives"][0]["version_id"],"b2-synthetic-v1")
         self.assertNotIn(l["lease_token"],json.dumps(ptr))
