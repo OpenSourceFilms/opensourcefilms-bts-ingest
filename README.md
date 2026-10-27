@@ -20,9 +20,13 @@ Run Python 3.8+ with no additional packages:
 python3 -B tests/offline_public_intake.py -q
 python3 -B tests/offline_object_key_safety.py -q
 python3 -B tests/offline_worker_timing.py -q
+python3 -B tests/offline_fenced_leases.py -q
+python3 -B tests/offline_derivative_generation.py -q
+python3 -B tests/offline_worker_v2_gateway.py -q
+python3 -B tests/offline_accepted_derivatives.py -q
 ```
 
-Expected result: **44 registry tests, 6 object-key tests, and 7 worker-timing/owner tests, all OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
+Expected result: **44 registry tests, 6 object-key tests, 7 worker-timing/owner tests, 9 fenced-worker tests, 5 derivative-generation tests, 5 v2 gateway tests, and 5 accepted-generation reader tests, all OK**. All tests use temporary SQLite databases, synthetic file metadata, synthetic object storage names and no B2 or public network connections.
 
 ### Minimal local registry example
 
@@ -271,6 +275,30 @@ unchanged. Four disposable-SQLite regressions verify that invalid
 durations cannot consume an attempt, alter an existing lease or strand
 a queued job behind an infinite retry date. Successful heartbeat,
 completion, zero-delay and fractional-delay deferral remain supported.
+
+**Service-side verification and accepted-reader prototypes:** The isolated
+`worker_v2_gateway.py` adapter streams exact-version B2 reads and checks
+SHA-256/byte counts before attempting an atomic fenced finish; a late lease
+expiry still rejects the finish. The `accepted_derivatives.py` resolver
+selects references only from completed v2 jobs whose generation prefix was
+persisted separately by the registry, rather than trusting arbitrary v1
+worker metadata. Both are **library candidates**, not installed FastAPI
+routes, B2 readers, signed URLs or local promotion services.
+
+**Derivative acceptance prototype:** Fenced success results carrying derivative
+objects must reference objects under the current lease's domain-separated
+`_generations/` namespace, pin B2 version IDs and SHA-256 claims, and omit
+pre-accepted canonical local publication paths. A synthetic memory-only
+interleaving proves the recorded accepted B result survives a late A upload
+to A's separate namespace. **Real B2 verification and canonical reader
+migration are not implemented.** Unfenced v1 processing remains unchanged.
+
+**Opt-in fencing candidate:** A versioned lease-token implementation is staged
+for future API/worker integration. Its offline proof and rollout/rollback
+constraints are in [docs/worker-lease-fencing-v2.md](docs/worker-lease-fencing-v2.md).
+Legacy owner-only clients remain vulnerable to the same-owner takeover race
+until all callers are migrated and v1 lease issuance is disabled. The public
+library is not proof of deployed fencing.
 
 **Important:** This does *not* fix the separate same-owner, stale-worker
 **lease fencing** race tracked in
