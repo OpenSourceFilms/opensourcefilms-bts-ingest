@@ -7,6 +7,7 @@ fenced generation committed by the service's registry.
 """
 from __future__ import annotations
 
+from contextlib import closing
 import json
 import re
 import sqlite3
@@ -31,7 +32,7 @@ def accepted_generation(reg, job_id):
     # and blocks the intake writer even though this lookup does not mutate.
     # Quote the path so a filename with '?' or '#' cannot alter URI options.
     uri = "file:" + quote(reg.path, safe="/") + "?mode=ro"
-    with sqlite3.connect(uri, uri=True, timeout=30) as c:
+    with closing(sqlite3.connect(uri, uri=True, timeout=30)) as c:
         c.row_factory = sqlite3.Row
         row = c.execute(
             "SELECT j.status,j.accepted_generation_prefix,j.result_json,"
