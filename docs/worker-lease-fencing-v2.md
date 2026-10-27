@@ -59,6 +59,64 @@ v2 jobs are still leased would re-enable unfenced mutations. A supported
 rollback must stop issuing new v2 leases, drain/quarantine existing v2 leases,
 verify no fenced jobs remain, and only then revert the registry/API together.
 
+## Actual BTS service/worker contract, read-only source inspection
+
+The current private BTS development snapshot has these authenticated
+FastAPI handlers: `POST /api/worker/lease`, `/heartbeat`, `/finish` and
+`/defer` in `bts_ingest/app.py`, and calls them from `Api.call`,
+`Heartbeat.run`, `handle` and `main` in `bts_ingest/worker.py`.
+The shared worker API bearer token is separate from its currently
+UUID-suffixed `owner` field. Existing HTTP request bodies do not carry
+a claim-generation credential.
+
+**Recommended additive v2 contract (not deployed):**
+
+| v2 route | Request payload | Response / invariant |
+|---|---|---|
+| `POST /api/worker/v2/lease` | `owner` | No job: 204. Leased: existing fields plus opaque `lease_token`, delivered only on acquisition. |
+| `POST /api/worker/v2/heartbeat` | `job_id`, `owner`, `lease_token` | 200 if current unexpired token matched atomically; 409 otherwise. |
+| `POST /api/worker/v2/defer` | `job_id`, `owner`, `lease_token`, `delay_s`, `reason` | Release/refund only this generation; 409 on lost claim. |
+| `POST /api/worker/v2/finish` | `job_id`, `owner`, `lease_token`, `ok`, result/error fields | Terminal result accepted only for this generation. This does not authorize premature public derivative promotion. |
+
+Keep the existing service bearer authentication on every route. Use a
+distinct v2 request model requiring `lease_token`; do not make the field
+optional in a v2 handler or silently retry a failed v2 call against v1.
+The worker must retain the generation token only in memory for the lifetime
+of its claim, pass it from `main` through `handle` into its heartbeat
+thread and terminal/defer calls, and never include it in logs or error JSON.
+On 409, stop publication and discard its staging generation.
+
+### Publication fence, separate from the SQLite fence
+
+**Release blocker:** In the inspected development worker,
+`process()` currently uploads to a **shared, deterministic B2 key**
+(`key=f"{prefix}/{Path(path).name}"`) and calls
+`publish_local(prefix, ...)` before `handle()` calls
+`/api/worker/finish`. The `hb.check()` calls are local checks of an
+asynchronously renewed lease, not atomic checks coupled to an external
+write. Lease expiry and reassignment during a transfer can therefore
+allow a stale worker to overwrite B2 derivatives or publish a local
+directory *even when the later registry finish is correctly rejected*.
+This remains possible even if every current worker uses a unique owner.
+
+A safe redesign must ensure that **uncommitted generations never write
+the canonical keys/directories or become visible as the accepted result**.
+Prefer content/claim-generation-scoped immutable B2 staging keys and
+local staging directories. The server must verify the claim token and
+approve one canonical generation before the readers follow a pointer to
+it, or a single controlled publisher must promote only already accepted
+generations with a separate idempotent promotion protocol. If older
+readers require fixed B2 keys or local paths, qualify the migration and
+atomicity explicitly; appending a token to a filename by itself does not
+make the canonical publication path safe.
+
+Required red tests before release: worker A's B2 upload begins, its claim
+expires, worker B leases and publishes, then worker A's transfer completes.
+Assert that A's output is invisible to canonical readers and B remains
+authoritative. Repeat for local `publish_local` between its two renames,
+for a process crash during promotion, for a retried finish response and
+for restarted workers discovering obsolete staging generations.
+
 ## Proposed deployment sequence (requires the worker/API owner)
 
 1. **Inventory consumers and backups.** Locate every worker route and caller;
