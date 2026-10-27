@@ -81,9 +81,11 @@ models B's acceptance and an even later upload by A; B's accepted key and
 pinned version remain unchanged.
 
 **This is not sufficient production acceptance:**
-- The published registry does not yet require this protocol for successful
-  fenced jobs **without** derivative fields, so v2 API integration must
-  explicitly fail closed on unscoped output-producing successes.
+- The published registry now **rejects any successful fenced result**
+  without an explicit `publication_protocol="generation-scoped-v1"`
+  and a bounded `derivatives` list, including empty lists for legitimately
+  unsupported media. This protects the registry boundary, but the API must
+  also fail closed on malformed or unverified external outputs.
 - The source/API must authenticate the worker and independently verify every
   reported B2 object, version and digest. A syntactically valid worker
   manifest is not remote integrity evidence.
