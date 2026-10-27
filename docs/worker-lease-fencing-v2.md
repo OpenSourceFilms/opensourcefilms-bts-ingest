@@ -69,7 +69,7 @@ using its private `lease_token`. Each derivative must be written under
 `<validated original derived prefix>/_generations/<generation-id>/<safe filename>`
 rather than to a shared latest-object key.
 
-For a successful fenced lease **that reports derivative-publication fields**,
+For **every successful fenced lease**,
 the registry validates `publication_protocol="generation-scoped-v1"`,
 validates each derivative's B2 key against this generation's prefix,
 requires `sha256`, `version_id` and `bytes`, and rejects reported
@@ -79,6 +79,41 @@ non-secret `generation_prefix`. A stale lease cannot replace that row or
 claim another generation's derivative list. The isolated memory-only test
 models B's acceptance and an even later upload by A; B's accepted key and
 pinned version remain unchanged.
+
+### Read-side winner and remote-integrity prototypes
+
+The public candidate now persists `jobs.accepted_generation_prefix`,
+an additive nullable column populated **only** by a successful token-fenced
+terminal SQL update. Legacy v1 successes, including any maliciously supplied
+`result_json.generation_prefix`, do not populate it. Concurrent, writer-locked
+legacy schema migration adds both fencing and accepted-generation fields.
+
+The pure-Python `FencedWorkerGateway` in
+[`worker_v2_gateway.py`](../bts_ingest/worker_v2_gateway.py)
+requires a read-capable S3/B2 client. It validates the worker's declared
+lease generation, **GETs each exact `VersionId`**, streams and checks its
+reported byte count and SHA-256 under a bounded total budget, then invokes
+the registry's authoritative atomic `finish_job` check. If a lease expires
+during remote verification, no stale terminal result is committed. An
+invalid B2 version, missing object, wrong digest, oversized object or
+unscoped manifest fails closed. The caller must separately enforce
+worker/API authentication and map verification errors to safe HTTP responses.
+These methods are **not** installed API endpoints.
+
+The read-only
+[`accepted_derivatives.accepted_generation`](../bts_ingest/accepted_derivatives.py)
+helper resolves a completed v2 job only when the independently committed
+`accepted_generation_prefix` agrees with the result manifest and all
+object keys, versions and hashes remain structurally sound. A legacy v1
+completion cannot impersonate a v2 accepted result merely by returning
+plausible JSON. Consumers must authenticate their own access to the asset
+and fetch the **pinned** versions, not the latest object at a shared key.
+
+These properties have five additional offline gateway and five reader
+regressions, alongside the nine lease and five generation tests.
+The remote object implementation in CI is **strictly in-memory** and does
+not qualify deployed B2 credentials, bucket versioning, worker processes,
+FastAPI routes, object-store semantics or local publication.
 
 **This is not sufficient production acceptance:**
 - The published registry now **rejects any successful fenced result**
