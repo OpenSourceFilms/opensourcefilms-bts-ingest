@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   lease_owner TEXT,
   lease_expires REAL,
   lease_token_sha256 TEXT,    -- optional v2 fencing; legacy leases use NULL
+  accepted_generation_prefix TEXT, -- durable v2 winner, NULL for legacy/unaccepted
   result_json TEXT,
   error TEXT,
   available_at REAL NOT NULL DEFAULT 0,
@@ -234,6 +235,8 @@ class Registry:
                 columns = {row[1] for row in c.execute("PRAGMA table_info(jobs)")}
                 if "lease_token_sha256" not in columns:
                     c.execute("ALTER TABLE jobs ADD COLUMN lease_token_sha256 TEXT")
+                if "accepted_generation_prefix" not in columns:
+                    c.execute("ALTER TABLE jobs ADD COLUMN accepted_generation_prefix TEXT")
                 c.commit()
             except BaseException:
                 c.rollback()
@@ -603,11 +606,11 @@ class Registry:
                 raise ValueError("lease_s must produce a finite future deadline")
             # Crashed workers spend attempts too; expiry must not bypass the budget.
             c.execute("UPDATE jobs SET status='quarantined', lease_owner=NULL, lease_expires=NULL,"
-                      " lease_token_sha256=NULL, updated_at=?"
+                      " lease_token_sha256=NULL, accepted_generation_prefix=NULL, updated_at=?"
                       " WHERE status='leased' AND lease_expires <= ? AND attempts >= ?",
                       (now, now, MAX_ATTEMPTS))
             c.execute("UPDATE jobs SET status='queued', lease_owner=NULL, lease_expires=NULL,"
-                      " lease_token_sha256=NULL, updated_at=? "
+                      " lease_token_sha256=NULL, accepted_generation_prefix=NULL, updated_at=? "
                       "WHERE status='leased' AND lease_expires <= ?", (now, now))
             j = c.execute("SELECT * FROM jobs WHERE status='queued' AND available_at <= ? ORDER BY id LIMIT 1",
                           (now,)).fetchone()
@@ -615,7 +618,7 @@ class Registry:
                 return None
             token = secrets.token_urlsafe(32) if fenced else None
             c.execute("UPDATE jobs SET status='leased', lease_owner=?, lease_expires=?,"
-                      " lease_token_sha256=?, attempts=attempts+1,"
+                      " lease_token_sha256=?, accepted_generation_prefix=NULL, attempts=attempts+1,"
                       " updated_at=? WHERE id=?",
                       (owner, deadline, _lease_token_hash(token), now, j["id"]))
             self.event(c, owner, "job.leased", j["asset_id"], job_id=j["id"], attempt=j["attempts"] + 1)
@@ -664,6 +667,7 @@ class Registry:
             # prevents a stale worker's subsequent shared-key B2 upload from
             # becoming the recorded successful result. The API must still
             # verify remote object versions independently.
+            accepted_generation = None
             if ok and token_hash is not None:
                 # A fenced success must explicitly declare a scoped result,
                 # even when no derivative was produced (unsupported media).
@@ -673,6 +677,7 @@ class Registry:
                 prefix = derivative_generation.generation_prefix(asset["b2_key"], lease_token)
                 derivative_generation.validate_manifest(asset["b2_key"], lease_token, result)
                 result = {**result, "generation_prefix": prefix}
+                accepted_generation = prefix
             if ok:
                 status = "done"
             elif quarantine or j["attempts"] >= MAX_ATTEMPTS:
@@ -680,9 +685,11 @@ class Registry:
             else:
                 status = "queued"
             c.execute("UPDATE jobs SET status=?, lease_owner=NULL, lease_expires=NULL,"
-                      " lease_token_sha256=NULL, result_json=?,"
+                      " lease_token_sha256=NULL, accepted_generation_prefix=?, result_json=?,"
                       " error=?, updated_at=? WHERE id=?",
-                      (status, json.dumps(result) if result is not None else j["result_json"], error, now, job_id))
+                      (status, accepted_generation,
+                       json.dumps(result) if result is not None else j["result_json"],
+                       error, now, job_id))
             self.event(c, owner, f"job.{status}", j["asset_id"], job_id=job_id, error=error)
             if ok and result and result.get("sha256"):
                 # Compare canonical digests, never arbitrary worker values.
@@ -709,7 +716,8 @@ class Registry:
             if not math.isfinite(available_at) or available_at < now:
                 raise ValueError("delay_s must produce a finite retry deadline")
             cur = c.execute("UPDATE jobs SET status='queued', lease_owner=NULL, lease_expires=NULL,"
-                            " lease_token_sha256=NULL, attempts=MAX(attempts-1,0),"
+                            " lease_token_sha256=NULL, accepted_generation_prefix=NULL,"
+                            " attempts=MAX(attempts-1,0),"
                             " available_at=?, error=?, updated_at=?"
                             " WHERE id=? AND lease_owner=? AND lease_token_sha256 IS ?"
                             " AND status='leased' AND lease_expires>?",
