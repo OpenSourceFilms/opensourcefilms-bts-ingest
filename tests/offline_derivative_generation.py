@@ -93,6 +93,9 @@ class DerivativeGenerationTests(unittest.TestCase):
         good = self.manifest(token)
         wrong_token = "some-other-valid-token"
         invalid = [
+            None,
+            {},
+            {"processed": True},
             {**good, "derivatives": [{**good["derivatives"][0],
                                      "b2_key": derivative_generation.generation_key(
                                          self.original_key, wrong_token, "thumbnail.jpg")}]},
