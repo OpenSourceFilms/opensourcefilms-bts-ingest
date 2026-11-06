@@ -285,3 +285,10 @@ acceptance test.
 **This is not a deployable HTTP upload application. Do not expose these modules directly to untrusted traffic.** Browser authentication, upload signing, storage access controls, network rate limiting, asset verification and deployment hardening are deliberately not included or asserted as tested. Neither Backblaze credentials, contributor records, footage, URLs nor production endpoints are distributed.
 
 See ATTRIBUTION.md for technology provenance. OSF's MIT licence applies only to original files in this repository.
+
+
+## Public processing matrix preview
+
+[Open the public 46-column BTS processing matrix demonstration](https://htmlpreview.github.io/?https://github.com/OpenSourceFilms/opensourcefilms-bts-ingest/blob/main/docs/processing-matrix-demo.html). It runs in a normal browser without an upload invitation. The page contains **synthetic sample data only** and does not contact the live BTS upload service or disclose contributor files. It demonstrates horizontally scrollable, non-collapsible process columns, pinned file metadata, measured-style progress and simulated state repair. See [standalone HTML source](docs/processing-matrix-demo.html).
+
+Production access to genuine asset status remains invitation-scoped and is not enabled by this public preview. The protected native v35 service cutover, downstream worker execution and v38 evidence projection must be qualified before a separate privacy-reviewed real-data view can be published.
