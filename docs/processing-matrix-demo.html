@@ -16,8 +16,8 @@
   <div class="brand"><div><div class="logo">Open Source Films <span aria-hidden="true">/</span> BTS Ingress</div><div class="eyebrow">Media processing observability</div></div><small>Public showcase · No account required</small></div>
   <h1>Every file. Every process.<br>One processing matrix.</h1>
   <p class="lede">46 always-visible processing columns, live-style progress meters, short outcome states, sticky filenames and inspectable per-cell evidence. Scroll horizontally to see the entire pipeline.</p>
-  <div class="notice" role="status"><strong>Demonstration only.</strong> Every filename and status on this public page is synthetic. Choose “Public live feed” to request the separate, explicitly authorised anonymous projection. The demonstration does not expose any private BTS uploads or live RunPod processing. No contributor records, secrets or storage paths are published.</div>
-  <section class="metrics" aria-label="Overview"><div class="metric"><strong id="m-files">0</strong><span>Sample files</span></div><div class="metric"><strong>46</strong><span>Process columns</span></div><div class="metric"><strong id="m-active">0</strong><span>Simulated running</span></div><div class="metric"><strong id="m-attn">0</strong><span>Need attention</span></div></section>
+  <div class="notice" id="privacy-notice" role="status"><strong>Demonstration only.</strong> Every filename and status on this public page is synthetic. Choose “Public live feed” to request the separate, explicitly authorised anonymous projection. The demonstration does not expose any private BTS uploads or live RunPod processing. No contributor records, secrets or storage paths are published.</div>
+  <section class="metrics" aria-label="Overview"><div class="metric"><strong id="m-files">0</strong><span id="m-files-label">Sample files</span></div><div class="metric"><strong>46</strong><span>Process columns</span></div><div class="metric"><strong id="m-active">0</strong><span id="m-active-label">Simulated running</span></div><div class="metric"><strong id="m-attn">0</strong><span>Need attention</span></div></section>
   <div class="toolbar"><label>Search files<input id="search" type="search" placeholder="Find a sample file..." autocomplete="off"></label><label>Show<select id="filter"><option value="all">All files</option><option value="active">Running</option><option value="attention">Needs attention</option><option value="verified">Fully verified</option></select></label><label>Jump to group<select id="jump"><option value="">Choose group</option></select></label><label>Data source<select id="data-source" aria-label="Matrix data source"><option value="demo">Demonstration</option><option value="live">Public live feed</option></select></label><button id="repair" type="button" title="Changes only synthetic demonstration data">Advance sample repair</button><span class="right">Select any process cell for its status and source of evidence. All 46 columns remain present.</span></div>
   <p class="feed-state" id="feed-state" role="status" aria-live="polite">Showing synthetic demonstration records. Public live data is not connected.</p>
   <div class="grid-area" id="viewport" tabindex="0" aria-label="Horizontally scrollable BTS process matrix"><table class="grid" id="matrix"><thead id="head"></thead><tbody id="body"></tbody></table></div>
@@ -35,6 +35,13 @@ const PUBLIC_API="https://upload.opensourcefilms.org/public/bts-processing-matri
 const STATUS_VALUES=new Set(Object.keys(LABELS));
 const EXPECTED_IDS=COLS.map(c=>c.id);
 let mode="demo", liveRows=[], polling=false, liveRevision=0, liveTimer=null;
+function updateModeText(){
+  document.getElementById("privacy-notice").textContent=mode==="live"
+    ?"Public live mode. Only pseudonymous, individually authorised statuses are requested; no contributor filenames, media or raw evidence are displayed. If the service is unavailable, results are blank."
+    :"Demonstration only. Every filename and status shown below is synthetic. Choose Public live feed to request separately authorised anonymous processing statuses.";
+  document.getElementById("m-files-label").textContent=mode==="live"?"Approved media":"Sample files";
+  document.getElementById("m-active-label").textContent=mode==="live"?"Running":"Simulated running";
+}
 function currentRows(){return mode==="live"?liveRows:examples;}
 function safeState(value){return STATUS_VALUES.has(value)?value:"unverified";}
 function setFeed(message,kind=""){const p=document.getElementById("feed-state");p.textContent=message;p.className="feed-state"+(kind?" "+kind:"");}
@@ -63,7 +70,9 @@ async function loadPublicFeed(){
       const data=await response.json();
       if(data.scope!=="public_explicitly_approved"||!Array.isArray(data.process_columns)||data.process_columns.length!==46||data.process_columns.some((v,i)=>v!==EXPECTED_IDS[i])||!Array.isArray(data.items)||data.items.length>100)throw Error("unexpected_public_status_schema");
       for(const raw of data.items){const row=decodePublicRow(raw);if(seen.has(row.id))throw Error("duplicate_public_alias");seen.add(row.id);all.push(row);}
-      if(typeof data.read_at==="number"&&Number.isFinite(data.read_at))lastRead=Math.max(lastRead,data.read_at);
+      if(typeof data.read_at!=="number"||!Number.isFinite(data.read_at)||Math.abs(Date.now()/1000-data.read_at)>120)throw Error("stale_public_snapshot");
+      if((data.items.length>0&&data.data_state!=="live_source_bound")||(data.items.length===0&&!["no_public_assets_approved","live_source_bound"].includes(data.data_state)))throw Error("unqualified_public_snapshot");
+      lastRead=Math.max(lastRead,data.read_at);
       if(!data.has_more){after="";break;}
       if(typeof data.next_cursor!=="string"||data.next_cursor===after||!/^[A-Za-z0-9_-]{12,40}$/.test(data.next_cursor))throw Error("invalid_public_cursor");
       after=data.next_cursor;
@@ -152,6 +161,7 @@ function render(){
 }
 document.getElementById("data-source").addEventListener("change",e=>{
   mode=e.target.value==="live"?"live":"demo";
+  updateModeText();
   if(liveTimer!==null)clearTimeout(liveTimer);
   if(mode==="live"){liveRows=[];setFeed("Connecting to the anonymised, opt-in public processing feed. Real contributor records are never shown without an owner-approved public grant.");render();loadPublicFeed();}
   else{liveRows=[];setFeed("Showing synthetic demonstration records. No private contributor data is connected.");render();}
@@ -171,7 +181,7 @@ document.getElementById("repair").addEventListener("click",()=>{
   render();
 });
 if(COLS.length!==46)throw Error("Expected exactly 46 always-visible process columns");
-head();render();
+head();updateModeText();render();
 </script>
 </body>
 </html>
